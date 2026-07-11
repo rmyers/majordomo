@@ -85,6 +85,10 @@ func ReadFile(root, name string) (string, error) {
 	return string(data), nil
 }
 
+func WriteFile(root, name string, data []byte) error {
+	return os.WriteFile(filepath.Join(root, name), data, 0o644)
+}
+
 func FileSize(root, name string) int64 {
 	info, err := os.Stat(filepath.Join(root, name))
 	if err != nil {

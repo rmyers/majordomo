@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Majordomo</title>
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg: #1a1a2e;
+      --surface: #16213e;
+      --surface2: #0f3460;
+      --text: #e0e0e0;
+      --text-dim: #a0a0b0;
+      --accent: #e94560;
+      --accent2: #533483;
+      --user-bubble: #0f3460;
+      --assistant-bubble: #16213e;
+      --tool-bg: #0a1628;
+      --border: #2a2a4a;
+      --success: #4ade80;
+      --error: #f87171;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+
+    html,
+    body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    /* Header */
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--surface);
+    }
+
+    header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+
+    #status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    #status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-dim);
+    }
+
+    #status-dot.connected {
+      background: var(--success);
+    }
+
+    #status-dot.error {
+      background: var(--error);
+    }
+
+    /* Settings button */
+    #settings-btn {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 4px 8px;
+      font-size: 18px;
+      border-radius: 6px;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    #settings-btn:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
+
+    /* Messages */
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .message {
+      max-width: 85%;
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .message.user {
+      align-self: flex-end;
+      background: var(--user-bubble);
+      border: 1px solid var(--border);
+      border-bottom-right-radius: 4px;
+    }
+
+    .message.assistant {
+      align-self: flex-start;
+      background: var(--assistant-bubble);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+
+    .message.assistant .tool-section {
+      margin-top: 10px;
+    }
+
+    /* Tool sections */
+    .tool-section {
+      margin-top: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .tool-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      background: var(--tool-bg);
+      cursor: pointer;
+      font-size: 12px;
+      font-family: var(--mono);
+      color: var(--text-dim);
+      user-select: none;
+    }
+
+    .tool-header:hover {
+      background: var(--surface2);
+    }
+
+    .tool-header .arrow {
+      transition: transform 0.2s;
+      display: inline-block;
+    }
+
+    .tool-header .arrow.open {
+      transform: rotate(90deg);
+    }
+
+    .tool-body {
+      display: none;
+      padding: 8px 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      background: var(--tool-bg);
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .tool-body.open {
+      display: block;
+    }
+
+    .tool-body.error {
+      color: var(--error);
+    }
+
+    /* Input */
+    #input-area {
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      gap: 10px;
+    }
+
+    #input {
+      flex: 1;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      min-height: 40px;
+      max-height: 120px;
+    }
+
+    #input:focus {
+      border-color: var(--accent);
+    }
+
+    #input::placeholder {
+      color: var(--text-dim);
+    }
+
+    #send-btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: white;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+
+    #send-btn:hover {
+      opacity: 0.85;
+    }
+
+    #send-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+
+    /* Typing indicator */
+    .typing {
+      display: flex;
+      gap: 4px;
+      padding: 12px 16px;
+    }
+
+    .typing span {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      animation: bounce 1.4s infinite ease-in-out;
+    }
+
+    .typing span:nth-child(1) {
+      animation-delay: 0s;
+    }
+
+    .typing span:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+
+    .typing span:nth-child(3) {
+      animation-delay: 0.4s;
+    }
+
+    @keyframes bounce {
+
+      0%,
+      80%,
+      100% {
+        transform: translateY(0);
+      }
+
+      40% {
+        transform: translateY(-6px);
+      }
+    }
+
+    /* Scrollbar */
+    #messages::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    #messages::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    #messages::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    /* Config modal */
+    #config-modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #config-modal.open {
+      display: flex;
+    }
+
+    #config-form {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      width: 420px;
+      max-width: 90vw;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+
+    #config-form h2 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+    }
+
+    .config-field {
+      margin-bottom: 14px;
+    }
+
+    .config-field label {
+      display: block;
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+    }
+
+    .config-field input,
+    .config-field select {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      outline: none;
+    }
+
+    .config-field input:focus,
+    .config-field select:focus {
+      border-color: var(--accent);
+    }
+
+    .config-field select {
+      cursor: pointer;
+    }
+
+    .config-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .config-actions button {
+      padding: 8px 16px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface2);
+      color: var(--text);
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .config-actions button:hover {
+      background: var(--border);
+    }
+
+    .config-actions button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .config-actions button.primary:hover {
+      opacity: 0.85;
+    }
+
+    #config-status {
+      font-size: 12px;
+      margin-top: 10px;
+      min-height: 16px;
+    }
+
+    #config-status.success {
+      color: var(--success);
+    }
+
+    #config-status.error {
+      color: var(--error);
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app">
+    <header>
+      <h1>Majordomo</h1>
+      <button id="settings-btn" title="Settings">&#9881;</button>
+      <div id="status">
+        <div id="status-dot"></div>
+        <span id="status-text">disconnected</span>
+      </div>
+    </header>
+
+    <div id="messages"></div>
+
+    <div id="input-area">
+      <textarea id="input" placeholder="Ask me anything..." rows="1"></textarea>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+
+  <!-- Config Modal -->
+  <div id="config-modal">
+    <div id="config-form">
+      <h2>LLM Configuration</h2>
+
+      <div class="config-field">
+        <label for="cfg-provider">Provider</label>
+        <select id="cfg-provider">
+          <option value="auto">Auto-detect</option>
+          <option value="ollama">Ollama</option>
+          <option value="omlx">Omlx</option>
+          <option value="lmstudio">LM Studio</option>
+          <option value="llamacpp">llama.cpp</option>
+        </select>
+      </div>
+
+      <div class="config-field">
+        <label for="cfg-model">Model name (leave empty for default)</label>
+        <input type="text" id="cfg-model" placeholder="e.g. llama3.2">
+      </div>
+
+      <div class="config-field">
+        <label for="cfg-url">Server URL (leave empty for default)</label>
+        <input type="text" id="cfg-url" placeholder="e.g. http://localhost:11434">
+      </div>
+
+      <div class="config-field">
+        <label for="cfg-apikey">API Key (optional)</label>
+        <input type="password" id="cfg-apikey" placeholder="Bearer token">
+      </div>
+
+      <div class="config-actions">
+        <button id="cfg-detect">Detect Server</button>
+        <button id="cfg-save" class="primary">Save</button>
+        <button id="cfg-cancel">Cancel</button>
+      </div>
+      <div id="config-status"></div>
+    </div>
+  </div>
+
+  <script>
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send-btn');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    const settingsBtn = document.getElementById('settings-btn');
+    const configModal = document.getElementById('config-modal');
+    const configStatus = document.getElementById('config-status');
+
+    // Config form elements
+    const cfgProvider = document.getElementById('cfg-provider');
+    const cfgModel = document.getElementById('cfg-model');
+    const cfgUrl = document.getElementById('cfg-url');
+    const cfgApiKey = document.getElementById('cfg-apikey');
+    const cfgDetect = document.getElementById('cfg-detect');
+    const cfgSave = document.getElementById('cfg-save');
+    const cfgCancel = document.getElementById('cfg-cancel');
+
+    // Auto-resize textarea
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    });
+
+    // Send on Enter (Shift+Enter for newline)
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    sendBtn.addEventListener('click', sendMessage);
+
+    function setStatus(state, text) {
+      statusDot.className = state;
+      statusText.textContent = text;
+    }
+
+    // ===== Chat State =====
+    let turn = 0; // incrementing turn counter for unique IDs
+
+    function sendMessage() {
+      const query = inputEl.value.trim();
+      if (!query) return;
+
+      const thisTurn = turn;
+      turn++;
+
+      // Add user message with unique ID
+      const userDiv = document.createElement('div');
+      userDiv.className = 'message user';
+      userDiv.id = `user-${thisTurn}`;
+      userDiv.textContent = query;
+      messagesEl.appendChild(userDiv);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+
+      // Clear input
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      sendBtn.disabled = true;
+      setStatus('connected', 'connecting...');
+
+      // Create assistant bubble (starts as typing dots, filled in by stream)
+      const responseDiv = document.createElement('div');
+      responseDiv.className = 'message assistant typing';
+      responseDiv.id = `response-${thisTurn}`;
+      responseDiv.innerHTML = '<span></span><span></span><span></span>';
+      messagesEl.appendChild(responseDiv);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+
+      // Connect to SSE stream via fetch
+      useFetchStream(query, thisTurn);
+    }
+
+    function useFetchStream(query, thisTurn) {
+      const url = `/api/stream?query=${encodeURIComponent(query)}`;
+
+      fetch(url, {
+        method: 'GET',
+        headers: { 'Accept': 'text/event-stream' }
+      })
+        .then(response => {
+          if (!response.ok) {
+            throw new Error(`Server error: ${response.status}`);
+          }
+          setStatus('connected', 'thinking...');
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          function readChunk() {
+            reader.read().then(({ done, value }) => {
+              if (done) {
+                sendBtn.disabled = false;
+                setStatus('', 'disconnected');
+                return;
+              }
+
+              buffer += decoder.decode(value, { stream: true });
+
+              // Process complete SSE frames
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
+
+              for (const line of lines) {
+                processSSELine(line.trim(), thisTurn);
+              }
+
+              readChunk();
+            });
+          }
+
+          readChunk();
+        })
+        .catch(err => {
+          // Show error in the response bubble
+          const el = document.getElementById(`response-${thisTurn}`);
+          if (el) {
+            el.classList.remove('typing');
+            el.textContent = `Error: ${err.message}`;
+          }
+          sendBtn.disabled = false;
+          setStatus('error', 'error');
+        });
+    }
+
+    function processSSELine(line, thisTurn) {
+      if (!line) return;
+
+      // Parse event type
+      if (line.startsWith('event: ')) {
+        currentEventType = line.slice(7).trim();
+        return;
+      }
+
+      // Parse data
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6);
+        if (data === '[DONE]') {
+          setStatus('', 'disconnected');
+          return;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          parsed.type = currentEventType;
+          handleServerEvent(parsed, thisTurn);
+        } catch (e) {
+          // Not JSON, ignore
+        }
+      }
+    }
+
+    function handleServerEvent(event, thisTurn) {
+      const responseEl = document.getElementById(`response-${thisTurn}`);
+      if (!responseEl) return;
+
+      if (event.type === 'message' || event.content) {
+        const content = event.content || (event.message && event.message.content) || '';
+        if (content) {
+          responseEl.classList.remove('typing');
+          responseEl.textContent = content;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+      }
+      if (event.type === 'error') {
+        responseEl.classList.remove('typing');
+        responseEl.textContent = `Error: ${event.message || 'Unknown error'}`;
+        sendBtn.disabled = false;
+        setStatus('error', 'error');
+      }
+    }
+
+    // ===== Config Modal =====
+
+    settingsBtn.addEventListener('click', () => {
+      loadConfig();
+      configModal.classList.add('open');
+    });
+
+    cfgCancel.addEventListener('click', () => {
+      configModal.classList.remove('open');
+      clearConfigStatus();
+    });
+
+    configModal.addEventListener('click', (e) => {
+      if (e.target === configModal) {
+        configModal.classList.remove('open');
+        clearConfigStatus();
+      }
+    });
+
+    cfgDetect.addEventListener('click', () => {
+      // Try to detect by hitting the stream endpoint with a probe query
+      // Actually, we can't auto-detect from the browser. Just populate defaults.
+      cfgProvider.value = 'auto';
+      cfgModel.value = '';
+      cfgUrl.value = '';
+      setConfigStatus('Set to auto-detect. The server will probe for local LLMs on startup.', 'success');
+    });
+
+    cfgSave.addEventListener('click', () => {
+      const cfg = {
+        llm: {
+          provider: cfgProvider.value,
+          model: cfgModel.value.trim(),
+          url: cfgUrl.value.trim(),
+          apiKey: cfgApiKey.value.trim(),
+        },
+      };
+
+      fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+      })
+        .then(res => {
+          if (!res.ok) {
+            return res.text().then(err => { throw new Error(err); });
+          }
+          return res.json();
+        })
+        .then(() => {
+          setConfigStatus('Configuration saved!', 'success');
+          setTimeout(() => {
+            configModal.classList.remove('open');
+            clearConfigStatus();
+          }, 1000);
+        })
+        .catch(err => {
+          setConfigStatus(`Save failed: ${err.message}`, 'error');
+        });
+    });
+
+    async function loadConfig() {
+      try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        cfgProvider.value = cfg.llm.provider || 'auto';
+        cfgModel.value = cfg.llm.model || '';
+        cfgUrl.value = cfg.llm.url || '';
+        cfgApiKey.value = ''; // Don't expose saved key
+      } catch (err) {
+        setConfigStatus(`Failed to load config: ${err.message}`, 'error');
+      }
+    }
+
+    function setConfigStatus(msg, type) {
+      configStatus.textContent = msg;
+      configStatus.className = type;
+    }
+
+    function clearConfigStatus() {
+      configStatus.textContent = '';
+      configStatus.className = '';
+    }
+  </script>
+</body>
+
+</html>
