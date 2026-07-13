@@ -10,6 +10,7 @@ import (
 
 	"github.com/julython/majordomo/internal/llm"
 	"github.com/julython/majordomo/internal/repo"
+	"github.com/julython/majordomo/internal/session"
 )
 
 // ToolResult holds the output of a tool execution.
@@ -21,8 +22,14 @@ type ToolResult struct {
 
 // Agent runs the agentic loop: send messages to LLM, execute tool calls, repeat.
 type Agent struct {
-	Client llm.Client
-	Tools  []llm.Tool
+	Client  llm.Client
+	Tools   []llm.Tool
+	session *session.Session
+}
+
+// SetSession attaches a session for recording events to disk.
+func (a *Agent) SetSession(s *session.Session) {
+	a.session = s
 }
 
 // New creates an Agent with the standard tools (read, edit, write, bash).
@@ -67,10 +74,15 @@ func New(client llm.Client) *Agent {
 
 // Run executes the agentic loop: send messages to the LLM, parse tool calls,
 // execute them, feed results back, and repeat until the LLM stops calling tools.
+// If a session is set, events are recorded to disk as JSONL.
 func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
 	var allMessages []llm.Message
 	for _, m := range messages {
 		allMessages = append(allMessages, m)
+		// Record the initial user message in the session.
+		if a.session != nil && m.Role == "user" {
+			a.session.RecordMessage("user", m.Content, nil, "")
+		}
 	}
 
 	iteration := 0
@@ -82,6 +94,11 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 		if err != nil {
 			slog.Error("LLM call failed", "iteration", iteration, "error", err)
 			return nil, fmt.Errorf("LLM call: %w", err)
+		}
+
+		// Record the assistant message in the session (with tool calls if any).
+		if a.session != nil {
+			a.session.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
 		}
 
 		// If the response has tool calls, execute them and loop
@@ -109,6 +126,11 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 					slog.Warn("tool execution returned error", "iteration", iteration, "toolName", tc.Function.Name, "error", result.Err)
 				} else {
 					slog.Debug("tool executed successfully", "iteration", iteration, "toolName", tc.Function.Name, "outputLen", len(result.Output))
+				}
+
+				// Record the tool result in the session.
+				if a.session != nil {
+					a.session.RecordToolResult(tc.ID, result.Output, result.Err, "")
 				}
 
 				// Append the tool result message
