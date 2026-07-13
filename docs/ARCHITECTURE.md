@@ -26,8 +26,10 @@ majordomo/
 │   │   └── agent.go             # Core: agentic loop with read/edit/write/bash tools
 │   ├── repo/
 │   │   └── repo.go              # File system utilities (walk, read, write, grep)
+│   ├── session/
+│   │   └── session.go           # JSONL session storage: records full agentic loop to disk
 │   └── server/
-│       └── server.go            # HTTP server: static UI + SSE agent stream + config API
+│       └── server.go            # HTTP server: static UI + SSE agent stream + config + sessions API
 ├── web/
 │   └── index.html               # Single-page web UI (HTML + CSS + JS)
 ├── go.mod
@@ -132,14 +134,42 @@ Config is persisted to `~/.majordomo/config.json`:
 
 Configuration can also be managed through the web UI settings gear icon.
 
+## Session Storage
+
+Sessions are persisted as JSONL files under `~/.majordomo/sessions/`, mirroring the PI format. A session represents one conversation — all messages in a session follow the same session ID.
+
+**Format (version 3):**
+
+| Line Type    | Fields |
+|--------------|--------|
+| `session`    | `version`, `id`, `timestamp`, `cwd` |
+| `model_change` | `id`, `timestamp`, `provider`, `model` |
+| `message`    | `id`, `parentId`, `timestamp`, `message: {role, content, tool_calls, tool_call_id}` |
+
+**Lifecycle:**
+
+1. The UI extracts the session ID from the URL (`/chat/<id>`).
+2. The session ID is passed via `?session=<id>` on the stream URL.
+3. If no session ID is provided, a new session is created and its ID is returned in a `session` SSE event.
+4. All messages in a session share the same session ID.
+5. The first user message is summarized to produce a session title.
+6. When the stream ends, the session is closed and the file is flushed.
+7. The full message history is loaded from the session file and prepended to the LLM context when resuming a session.
+
+**Session title:** The first user message is summarized (first sentence up to 60 chars) and stored as the session's title. This is returned by `/api/sessions` in the summary objects.
+
 ## Server API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Serves the web UI |
+| `/` | GET | Redirects to `/chat/<latest>` (or shows empty state if no sessions) |
+| `/chat/{id}` | GET | Serves the web UI for the specified session |
 | `/api/config` | GET | Returns current config as JSON |
 | `/api/config` | POST | Saves new config (JSON body) |
-| `/api/stream?query=...` | GET | SSE stream — starts agent loop, streams response |
+| `/api/sessions` | GET | Returns list of session summaries `{id, title, timestamp}` (newest first) |
+| `/api/sessions/{id}` | POST | Creates a new session, returns `{id}` |
+| `/api/sessions/{id}/history` | GET | Returns full message history for a session |
+| `/api/stream?query=...&session=<id>` | GET | SSE stream — starts/resumes agent loop, streams response |
 
 SSE event types:
 - `message` — JSON: `{content: "text chunk"}`

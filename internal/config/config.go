@@ -54,10 +54,19 @@ func Save(cfg *Config) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-func configPath() string {
+// ConfigDir returns the base directory where config and session data live.
+func ConfigDir() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		dir = "."
 	}
-	return filepath.Join(dir, "majordomo", "config.json")
+	return filepath.Join(dir, "majordomo"), nil
+}
+
+func configPath() string {
+	dir, err := ConfigDir()
+	if err != nil {
+		dir = "."
+	}
+	return filepath.Join(dir, "config.json")
 }

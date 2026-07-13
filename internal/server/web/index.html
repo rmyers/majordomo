@@ -75,6 +75,69 @@
       color: var(--text-dim);
     }
 
+    /* Session indicator */
+    #session-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 2px 8px;
+      font-size: 11px;
+      border-radius: 4px;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    #session-btn:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
+
+    #session-dropdown {
+      display: none;
+      position: absolute;
+      top: 100%;
+      right: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      min-width: 200px;
+      max-height: 300px;
+      overflow-y: auto;
+      z-index: 50;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    #session-dropdown.open {
+      display: block;
+    }
+
+    #session-dropdown .session-item {
+      padding: 6px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    #session-dropdown .session-item:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
+
+    #session-dropdown .session-item.new-session {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    #session-dropdown .session-label {
+      font-size: 11px;
+      color: var(--text-dim);
+      padding: 4px 8px;
+      font-weight: 600;
+    }
+
     #status-dot {
       width: 8px;
       height: 8px;
@@ -424,10 +487,14 @@
   <div id="app">
     <header>
       <h1>Majordomo</h1>
+      <button id="session-btn" title="Sessions">Sessions</button>
       <button id="settings-btn" title="Settings">&#9881;</button>
       <div id="status">
         <div id="status-dot"></div>
         <span id="status-text">disconnected</span>
+      </div>
+      <div id="session-dropdown">
+        <div class="session-label">Recent Sessions</div>
       </div>
     </header>
 
@@ -486,6 +553,8 @@
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
     const settingsBtn = document.getElementById('settings-btn');
+    const sessionBtn = document.getElementById('session-btn');
+    const sessionDropdown = document.getElementById('session-dropdown');
     const configModal = document.getElementById('config-modal');
     const configStatus = document.getElementById('config-status');
 
@@ -513,6 +582,118 @@
     });
 
     sendBtn.addEventListener('click', sendMessage);
+
+    // Session state — extracted from URL on page load.
+    let currentSessionId = extractSessionIdFromURL();
+
+    // Extract session ID from URL: /chat/<id> → session ID
+    function extractSessionIdFromURL() {
+      const path = window.location.pathname;
+      const match = path.match(/^\/chat\/([a-f0-9]{8})$/);
+      return match ? match[1] : null;
+    }
+
+    // Update browser URL to reflect the current session.
+    function updateSessionURL(sessionId) {
+      if (sessionId) {
+        history.pushState(null, '', '/chat/' + sessionId);
+      }
+    }
+
+    // Session button toggle
+    sessionBtn.addEventListener('click', () => {
+      sessionDropdown.classList.toggle('open');
+      if (sessionDropdown.classList.contains('open')) {
+        loadSessions();
+      }
+    });
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!sessionDropdown.contains(e.target) && e.target !== sessionBtn) {
+        sessionDropdown.classList.remove('open');
+      }
+    });
+
+    // Load sessions on page load.
+    loadSessions();
+
+    // If we navigated to an existing session, load its history.
+    if (currentSessionId) {
+      loadSessionMessages(currentSessionId);
+    }
+
+    function loadSessions() {
+      fetch('/api/sessions')
+        .then(res => res.json())
+        .then(summaries => {
+          const labelEl = sessionDropdown.querySelector('.session-label');
+          // Clear existing session items (keep the label)
+          const existingItems = sessionDropdown.querySelectorAll('.session-item');
+          existingItems.forEach(item => item.remove());
+
+          // Add "New Session" button at top.
+          // Navigates to / which redirects to the latest session.
+          const newBtn = document.createElement('div');
+          newBtn.className = 'session-item new-session';
+          newBtn.textContent = 'New Session';
+          newBtn.onclick = () => {
+            currentSessionId = null;
+            sessionDropdown.classList.remove('open');
+            window.location.href = '/';
+          };
+          sessionDropdown.insertBefore(newBtn, labelEl?.nextSibling || sessionDropdown.firstChild);
+
+          if (summaries.length === 0) return;
+
+          for (const s of summaries) {
+            const item = document.createElement('div');
+            item.className = 'session-item';
+            const title = s.title || s.id;
+            item.textContent = title;
+            item.title = s.id;
+            item.onclick = () => {
+              currentSessionId = s.id;
+              sessionDropdown.classList.remove('open');
+              updateSessionURL(s.id);
+              loadSessionMessages(s.id);
+            };
+            sessionDropdown.insertBefore(item, labelEl?.nextSibling || sessionDropdown.firstChild);
+          }
+        })
+        .catch(() => {});
+    }
+
+    function clearMessages() {
+      messagesEl.innerHTML = '';
+    }
+
+    function loadSessionMessages(sessionId) {
+      fetch(`/api/sessions/${sessionId}/history`)
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then(events => {
+          // Render each message event from history.
+          for (const ev of events) {
+            if (ev.Type === 'message' && ev.Message) {
+              const msg = JSON.parse(ev.Message);
+              appendMessage(msg.Role, msg.Content, msg.ToolCalls);
+            }
+          }
+        })
+        .catch(() => {});
+    }
+
+    // Render a single message (user or assistant) to the UI.
+    function appendMessage(role, content, toolCalls) {
+      const div = document.createElement('div');
+      div.className = `message ${role}`;
+      div.textContent = content || '';
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
 
     function setStatus(state, text) {
       statusDot.className = state;
@@ -551,12 +732,15 @@
       messagesEl.appendChild(responseDiv);
       messagesEl.scrollTop = messagesEl.scrollHeight;
 
-      // Connect to SSE stream via fetch
+      // Connect to SSE stream via fetch, passing session ID.
       useFetchStream(query, thisTurn);
     }
 
     function useFetchStream(query, thisTurn) {
-      const url = `/api/stream?query=${encodeURIComponent(query)}`;
+      let url = `/api/stream?query=${encodeURIComponent(query)}`;
+      if (currentSessionId) {
+        url += `&session=${currentSessionId}`;
+      }
 
       fetch(url, {
         method: 'GET',
@@ -635,6 +819,21 @@
     }
 
     function handleServerEvent(event, thisTurn) {
+      // Handle session event — learn the session ID from the server.
+      if (event.type === 'session') {
+        const sid = event.id;
+        if (sid) {
+          if (!currentSessionId) {
+            currentSessionId = sid;
+            // Refresh the dropdown to show the new session.
+            loadSessions();
+          }
+          // Always update URL to reflect the server's session.
+          updateSessionURL(sid);
+        }
+        return;
+      }
+
       const responseEl = document.getElementById(`response-${thisTurn}`);
       if (!responseEl) return;
 
