@@ -1,0 +1,15 @@
+{{template "layout.html" .}}
+
+{{define "content"}}
+<div id="index-view">
+  <div class="welcome-container">
+    <h2>Welcome to Majordomo</h2>
+    <p>Start a new conversation or select an existing session from the sidebar.</p>
+
+    <div id="input-area">
+      <textarea id="input" placeholder="Ask me anything..." rows="3" autofocus></textarea>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+</div>
+{{end}}

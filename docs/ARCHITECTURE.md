@@ -10,32 +10,6 @@ Majordomo is a local-first AI agent that interacts with your filesystem through 
 
 **The agent loop is the core.** Majordomo doesn't just answer questions — it takes actions. It can read files, edit them, write new files, and execute shell commands. The LLM decides which tools to use and with what arguments.
 
-## Project Structure
-
-```
-majordomo/
-├── cmd/
-│   └── majordomo/
-│       └── main.go              # CLI entrypoint: loads config, starts server
-├── internal/
-│   ├── config/
-│   │   └── config.go            # JSON config: LLM provider, model, URL, apiKey
-│   ├── llm/
-│   │   └── llm.go               # OpenAI-compatible client (Chat + StreamChat)
-│   ├── agent/
-│   │   └── agent.go             # Core: agentic loop with read/edit/write/bash tools
-│   ├── repo/
-│   │   └── repo.go              # File system utilities (walk, read, write, grep)
-│   ├── session/
-│   │   └── session.go           # JSONL session storage: records full agentic loop to disk
-│   └── server/
-│       └── server.go            # HTTP server: static UI + SSE agent stream + config + sessions API
-├── web/
-│   └── index.html               # Single-page web UI (HTML + CSS + JS)
-├── go.mod
-└── Makefile
-```
-
 ## Data Flow
 
 ```
@@ -67,6 +41,7 @@ User ──message──► Web UI ──SSE──► /api/stream
 ```
 
 Each iteration of the loop:
+
 1. **Agent** sends all accumulated messages (user + assistant + tool results) to the LLM
 2. **LLM** returns either text content (final answer) or `tool_calls` (requests to use tools)
 3. If tool calls: **Agent** executes each tool, appends results as `tool` role messages, and loops back to step 1
@@ -87,12 +62,12 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 
 **Tools:**
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `read` | Read file contents | `path` |
-| `edit` | Replace text in a file | `path`, `oldText`, `newText` |
-| `write` | Write/overwrite a file | `path`, `content` |
-| `bash` | Execute a shell command | `cmd` |
+| Tool    | Description             | Parameters                   |
+| ------- | ----------------------- | ---------------------------- |
+| `read`  | Read file contents      | `path`                       |
+| `edit`  | Replace text in a file  | `path`, `oldText`, `newText` |
+| `write` | Write/overwrite a file  | `path`, `content`            |
+| `bash`  | Execute a shell command | `cmd`                        |
 
 Tool definitions are sent to the LLM as OpenAI `tool_use` schema (function name, description, parameters), enabling the model to invoke tools naturally.
 
@@ -109,6 +84,7 @@ type Client interface {
 ```
 
 **Auto-detection** probes three common local LLM endpoints:
+
 - **Ollama** — `localhost:11434` (most common)
 - **LM Studio** — `localhost:1234`
 - **llama.cpp** — `localhost:8080`
@@ -140,11 +116,11 @@ Sessions are persisted as JSONL files under `~/.majordomo/sessions/`, mirroring 
 
 **Format (version 3):**
 
-| Line Type    | Fields |
-|--------------|--------|
-| `session`    | `version`, `id`, `timestamp`, `cwd` |
-| `model_change` | `id`, `timestamp`, `provider`, `model` |
-| `message`    | `id`, `parentId`, `timestamp`, `message: {role, content, tool_calls, tool_call_id}` |
+| Line Type      | Fields                                                                              |
+| -------------- | ----------------------------------------------------------------------------------- |
+| `session`      | `version`, `id`, `timestamp`, `cwd`                                                 |
+| `model_change` | `id`, `timestamp`, `provider`, `model`                                              |
+| `message`      | `id`, `parentId`, `timestamp`, `message: {role, content, tool_calls, tool_call_id}` |
 
 **Lifecycle:**
 
@@ -160,18 +136,19 @@ Sessions are persisted as JSONL files under `~/.majordomo/sessions/`, mirroring 
 
 ## Server API
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Redirects to `/chat/<latest>` (or shows empty state if no sessions) |
-| `/chat/{id}` | GET | Serves the web UI for the specified session |
-| `/api/config` | GET | Returns current config as JSON |
-| `/api/config` | POST | Saves new config (JSON body) |
-| `/api/sessions` | GET | Returns list of session summaries `{id, title, timestamp}` (newest first) |
-| `/api/sessions/{id}` | POST | Creates a new session, returns `{id}` |
-| `/api/sessions/{id}/history` | GET | Returns full message history for a session |
-| `/api/stream?query=...&session=<id>` | GET | SSE stream — starts/resumes agent loop, streams response |
+| Endpoint                             | Method | Description                                                               |
+| ------------------------------------ | ------ | ------------------------------------------------------------------------- |
+| `/`                                  | GET    | Redirects to `/chat/<latest>` (or shows empty state if no sessions)       |
+| `/chat/{id}`                         | GET    | Serves the web UI for the specified session                               |
+| `/api/config`                        | GET    | Returns current config as JSON                                            |
+| `/api/config`                        | POST   | Saves new config (JSON body)                                              |
+| `/api/sessions`                      | GET    | Returns list of session summaries `{id, title, timestamp}` (newest first) |
+| `/api/sessions/{id}`                 | POST   | Creates a new session, returns `{id}`                                     |
+| `/api/sessions/{id}/history`         | GET    | Returns full message history for a session                                |
+| `/api/stream?query=...&session=<id>` | GET    | SSE stream — starts/resumes agent loop, streams response                  |
 
 SSE event types:
+
 - `message` — JSON: `{content: "text chunk"}`
 - `error` — JSON: `{message: "error description"}`
 - `[DONE]` — literal string marking stream end

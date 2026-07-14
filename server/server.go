@@ -5,30 +5,39 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/julython/majordomo/internal/agent"
-	"github.com/julython/majordomo/internal/config"
-	"github.com/julython/majordomo/internal/llm"
-	"github.com/julython/majordomo/internal/session"
+	"github.com/rmyers/majordomo/agent"
+	"github.com/rmyers/majordomo/config"
+	"github.com/rmyers/majordomo/llm"
+	"github.com/rmyers/majordomo/session"
 )
 
-//go:embed web/index.html
+//go:embed templates/*.html styles.css app.js
 var webFS embed.FS
+
+var templates *template.Template
 
 // Server serves the web interface and SSE agent stream.
 type Server struct {
-	addr string
-	mu   sync.RWMutex
-	cfg  *config.Config
+	addr        string
+	mu          sync.RWMutex
+	cfg         *config.Config
+	sessionsDir string
 }
 
-// New creates a Server listening on the given address.
-func New(addr string) *Server {
-	return &Server{addr: addr}
+// New creates a Server listening on the given address with the specified sessions directory.
+func New(addr string, sessionsDir string) *Server {
+	return &Server{
+		addr:        addr,
+		sessionsDir: sessionsDir,
+	}
 }
 
 // Run starts the HTTP server.
@@ -37,13 +46,18 @@ func (s *Server) Run(cfg *config.Config) error {
 	s.cfg = cfg
 	s.mu.Unlock()
 
-	// Set the session package's config directory so sessions are stored
-	// in the same base directory as the config.
-	if dir, err := config.ConfigDir(); err == nil {
-		session.SetConfigDir(dir)
+	// Parse templates
+	var err error
+	templates, err = template.ParseFS(webFS, "templates/*.html")
+	if err != nil {
+		return fmt.Errorf("failed to parse templates: %w", err)
 	}
 
 	mux := http.NewServeMux()
+
+	// Serve static assets
+	mux.Handle("/styles.css", http.FileServer(http.FS(webFS)))
+	mux.Handle("/app.js", http.FileServer(http.FS(webFS)))
 
 	// Serve the web UI from the embedded filesystem.
 	mux.HandleFunc("/", s.handleRoot)
@@ -77,34 +91,33 @@ func (s *Server) getConfig() *config.Config {
 	return s.cfg
 }
 
-// handleConfig handles GET /.
+// handleRoot handles GET / - shows the index page with session list in sidebar.
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
-		// Serve other static files (CSS, JS, etc.) from the web/ directory.
-		http.FileServer(http.FS(webFS)).ServeHTTP(w, r)
+		http.NotFound(w, r)
 		return
 	}
-	summaries, err := session.List()
+
+	summaries, err := session.List(s.sessionsDir)
 	if err != nil {
-		slog.Error("failed to list sessions for root redirect", "error", err)
+		slog.Error("failed to list sessions", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if len(summaries) > 0 {
-		// Redirect to the most recent session.
-		latestID := summaries[0].ID
-		http.Redirect(w, r, "/chat/"+latestID, http.StatusFound)
-		return
+
+	data := struct {
+		Sessions  []session.Summary
+		SessionID string
+	}{
+		Sessions:  summaries,
+		SessionID: "",
 	}
-	// No sessions exist — serve the UI as-is (empty state).
-	html, err := webFS.ReadFile("web/index.html")
-	if err != nil {
-		slog.Error("failed to read embedded web UI", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(html)
+	if err := templates.ExecuteTemplate(w, "index.html", data); err != nil {
+		slog.Error("failed to render template", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
 }
 
 // handleConfig handles GET/POST for /api/config.
@@ -175,7 +188,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 // handleListSessions returns the list of session summaries (id + title).
 func (s *Server) handleListSessions(w http.ResponseWriter) {
-	summaries, err := session.List()
+	summaries, err := session.List(s.sessionsDir)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("list sessions: %v", err), http.StatusInternalServerError)
 		return
@@ -187,7 +200,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter) {
 // handleCreateSession creates a new session and returns its ID.
 func (s *Server) handleCreateSession(w http.ResponseWriter) {
 	slog.Info("creating new session")
-	sess, err := session.New()
+	sess, err := session.New(s.sessionsDir)
 	if err != nil {
 		slog.Error("failed to create session", "error", err)
 		http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
@@ -197,7 +210,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(map[string]string{"id": sess.ID()})
 }
 
-// handleChat serves the chat page for a specific session.
+// Message represents a chat message for template rendering
+type Message struct {
+	Role    string
+	Content string
+}
+
+// handleChat serves the chat page for a specific session with server-side rendered messages.
 // Route: /chat/{id} → serve web UI with the specified session.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Extract session ID from path parameter.
@@ -207,16 +226,60 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve the embedded web UI.
-	html, err := webFS.ReadFile("web/index.html")
+	// Load session to verify it exists
+	sess, err := session.Open(sessionID, s.sessionsDir)
 	if err != nil {
-		slog.Error("failed to read embedded web UI", "error", err)
+		slog.Error("failed to open session for chat view", "sessionID", sessionID, "error", err)
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	defer sess.Close()
+
+	// Load session history to render messages
+	var messages []Message
+	events, err := session.History(sess.Dir())
+	if err != nil {
+		slog.Warn("failed to load session history for rendering", "sessionID", sessionID, "error", err)
+	} else {
+		for _, ev := range events {
+			if ev.Type == "message" && ev.Message != nil {
+				var msg session.Message
+				if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
+					// Only render user and assistant messages with content
+					if (msg.Role == "user" || msg.Role == "assistant") && msg.Content != "" {
+						messages = append(messages, Message{
+							Role:    msg.Role,
+							Content: msg.Content,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Load all sessions for sidebar
+	summaries, err := session.List(s.sessionsDir)
+	if err != nil {
+		slog.Error("failed to list sessions", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
+	data := struct {
+		Sessions  []session.Summary
+		SessionID string
+		Messages  []Message
+	}{
+		Sessions:  summaries,
+		SessionID: sessionID,
+		Messages:  messages,
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(html)
+	if err := templates.ExecuteTemplate(w, "chat.html", data); err != nil {
+		slog.Error("failed to render chat template", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
 }
 
 // handleSessionHistory returns the full message history for a session.
@@ -235,15 +298,14 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("loading session history", "sessionID", sessionID)
 
-	sess, err := session.Open(sessionID)
-	if err != nil {
-		slog.Error("failed to open session for history", "sessionID", sessionID, "error", err)
-		http.Error(w, fmt.Sprintf("session not found: %v", err), http.StatusNotFound)
+	// Get the session file path
+	sessionFile := filepath.Join(s.sessionsDir, sessionID+".jsonl")
+	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
+		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
-	defer sess.Close()
 
-	events, err := session.History(sess.Dir())
+	events, err := session.History(sessionFile)
 	if err != nil {
 		slog.Error("failed to load session history", "sessionID", sessionID, "error", err)
 		http.Error(w, fmt.Sprintf("load history: %v", err), http.StatusInternalServerError)
@@ -289,7 +351,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	var sess *session.Session
 	if sessionID != "" {
 		var err error
-		sess, err = session.Open(sessionID)
+		sess, err = session.Open(sessionID, s.sessionsDir)
 		if err != nil {
 			slog.Error("failed to open session", "id", sessionID, "error", err)
 			http.Error(w, fmt.Sprintf("session not found: %v", err), http.StatusNotFound)
@@ -298,7 +360,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		slog.Info("session resumed", "id", sess.ID())
 	} else {
 		var err error
-		sess, err = session.New()
+		sess, err = session.New(s.sessionsDir)
 		if err != nil {
 			slog.Error("failed to create session", "error", err)
 			http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)

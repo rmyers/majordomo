@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/julython/majordomo/internal/llm"
-	"github.com/julython/majordomo/internal/repo"
-	"github.com/julython/majordomo/internal/session"
+	"github.com/rmyers/majordomo/llm"
+	"github.com/rmyers/majordomo/repo"
+	"github.com/rmyers/majordomo/session"
 )
 
 // ToolResult holds the output of a tool execution.

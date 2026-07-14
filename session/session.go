@@ -1,9 +1,8 @@
 // Package session provides JSONL-based session storage, recording the full
 // agentic loop (messages, tool calls, tool results) to disk for replay.
 //
-// Session files follow the PI JSONL format: each line is a JSON object
-// representing one event in the conversation. The directory layout mirrors
-// PI's: ~/.majordomo/sessions/<session-id>/<timestamp>_<uuid>.jsonl
+// Session files are stored as <session-id>.jsonl in the sessions directory.
+// The first line contains session metadata (id, title, timestamp).
 package session
 
 import (
@@ -17,32 +16,35 @@ import (
 	"sync"
 	"time"
 
-	"github.com/julython/majordomo/internal/llm"
+	"github.com/rmyers/majordomo/llm"
 )
 
 // Session records the events of an agentic interaction to a JSONL file.
 // It is safe for concurrent use by multiple goroutines.
 type Session struct {
-	id        string
-	dir       string // session directory path
-	file      *os.File
-	mu        sync.Mutex
-	iteration int  // monotonically increasing ID counter
-	title     string // summarized title from the first user message
+	id          string
+	file        *os.File
+	mu          sync.Mutex
+	iteration   int    // monotonically increasing ID counter
+	title       string // summarized title from the first user message
+	timestamp   time.Time
+	sessionsDir string // directory where this session is stored
 }
 
 // Event is a single line in the JSONL session file.
 type Event struct {
-	Type       string          `json:"type"`
-	ID         string          `json:"id"`
-	ParentID   *string         `json:"parentId,omitempty"`
-	Timestamp  string          `json:"timestamp"`
+	Type       string           `json:"type"`
+	ID         string           `json:"id"`
+	ParentID   *string          `json:"parentId,omitempty"`
+	Timestamp  string           `json:"timestamp"`
 	Message    *json.RawMessage `json:"message,omitempty"`
 	ToolCall   *json.RawMessage `json:"tool_call,omitempty"`
 	ToolResult *json.RawMessage `json:"tool_result,omitempty"`
 	// Metadata about the LLM used for this event.
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
+	// Session metadata (only in first line)
+	Title string `json:"title,omitempty"`
 }
 
 // Message represents a single message in the session (user, assistant, or tool).
@@ -75,62 +77,33 @@ type Summary struct {
 }
 
 const (
-	// configDirName is the root directory under ~/.majordomo/ where sessions live.
-	configDirName = "majordomo"
-	// sessionsSubDir is the subdirectory for session files.
-	sessionsSubDir = "sessions"
 	// sessionFileVersion is the current JSONL format version.
 	sessionFileVersion = 3
 )
 
-// configDir is the configured base directory for sessions.
-// When empty, New/Open/List fall back to os.UserConfigDir().
-var configDir string
-
-// SetConfigDir sets the base directory for session storage.
-// Call this from the server before creating or opening sessions.
-func SetConfigDir(dir string) {
-	configDir = dir
-}
-
-// New creates a new session under the default config directory (~/.majordomo/sessions/).
-// The session directory is created, and the JSONL file is opened for appending.
+// New creates a new session in the specified sessions directory.
+// The session file is created as <session-id>.jsonl.
 // Returns the Session and any filesystem error.
-func New() (*Session, error) {
-	baseDir := configDir
-	if baseDir == "" {
-		var err error
-		baseDir, err = os.UserConfigDir()
-		if err != nil {
-			baseDir = "."
-		}
-	}
-
-	sessionsDir := filepath.Join(baseDir, configDirName, sessionsSubDir)
+func New(sessionsDir string) (*Session, error) {
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create sessions directory: %w", err)
 	}
 
 	id := generateSessionID()
 	ts := time.Now().UTC()
-	dirName := ts.Format("2006-01-02T15-04-05.000Z") + "_" + id
+	filename := filepath.Join(sessionsDir, id+".jsonl")
 
-	dir := filepath.Join(sessionsDir, dirName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create session directory: %w", err)
-	}
-
-	filename := dirName + ".jsonl"
-	file, err := os.Create(filepath.Join(dir, filename))
+	file, err := os.Create(filename)
 	if err != nil {
 		return nil, fmt.Errorf("create session file: %w", err)
 	}
 
 	s := &Session{
-		id:    id,
-		dir:   dir,
-		file:  file,
-		title: "", // title will be set from the first user message
+		id:          id,
+		file:        file,
+		title:       "", // title will be set from the first user message
+		timestamp:   ts,
+		sessionsDir: sessionsDir,
 	}
 
 	// Write the session header record.
@@ -144,69 +117,50 @@ func New() (*Session, error) {
 		ID:        id,
 		Timestamp: ts.Format(time.RFC3339Nano),
 		Message:   (*json.RawMessage)(&header),
+		Title:     "", // will be updated after first user message
 	})
 
 	return s, nil
 }
 
-// Open resumes an existing session by its ID.
+// Open resumes an existing session by its ID from the specified sessions directory.
 // Returns the Session and any filesystem error.
-func Open(id string) (*Session, error) {
-	baseDir := configDir
-	if baseDir == "" {
-		var err error
-		baseDir, err = os.UserConfigDir()
-		if err != nil {
-			baseDir = "."
-		}
-	}
-
-	sessionsDir := filepath.Join(baseDir, configDirName, sessionsSubDir)
-
-	// Find the directory whose name contains this session ID.
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var targetDir string
-	for _, e := range entries {
-		if e.IsDir() && strings.Contains(e.Name(), "_"+id) {
-			targetDir = filepath.Join(sessionsDir, e.Name())
-			break
-		}
-	}
-	if targetDir == "" {
+func Open(id string, sessionsDir string) (*Session, error) {
+	filename := filepath.Join(sessionsDir, id+".jsonl")
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		return nil, fmt.Errorf("session %s not found", id)
 	}
 
-	// Find the JSONL file.
-	files, err := filepath.Glob(filepath.Join(targetDir, "*.jsonl"))
-	if err != nil || len(files) == 0 {
-		return nil, fmt.Errorf("no session file in %s", targetDir)
-	}
-
-	file, err := os.OpenFile(files[0], os.O_APPEND|os.O_RDWR, 0o644)
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open session file: %w", err)
 	}
 
 	s := &Session{
-		id:    id,
-		dir:   targetDir,
-		file:  file,
-		title: "", // will be populated from existing events
+		id:          id,
+		file:        file,
+		sessionsDir: sessionsDir,
 	}
 
-	// Read existing events to populate title.
-	sessions, err := History(targetDir)
-	if err == nil {
-		for _, ev := range sessions {
-			if ev.Type == "message" && ev.Message != nil {
-				var msg Message
-				if err := json.Unmarshal(*ev.Message, &msg); err == nil {
-					if msg.Role == "user" && s.title == "" {
-						s.title = summarize(msg.Content)
+	// Read existing events to populate title and timestamp.
+	events, err := History(filename)
+	if err == nil && len(events) > 0 {
+		// First event is the session header
+		s.title = events[0].Title
+		if ts, err := time.Parse(time.RFC3339Nano, events[0].Timestamp); err == nil {
+			s.timestamp = ts
+		}
+
+		// If title is empty, extract from first user message
+		if s.title == "" {
+			for _, ev := range events {
+				if ev.Type == "message" && ev.Message != nil {
+					var msg Message
+					if err := json.Unmarshal(*ev.Message, &msg); err == nil {
+						if msg.Role == "user" {
+							s.title = summarize(msg.Content)
+							break
+						}
 					}
 				}
 			}
@@ -269,9 +223,10 @@ func (s *Session) RecordMessage(role string, content string, toolCalls []llm.Too
 		Message:   (*json.RawMessage)(&msg),
 	})
 
-	// If this is the first user message and no title yet, summarize it.
+	// If this is the first user message and no title yet, summarize it and update the header.
 	if role == "user" && s.title == "" {
 		s.title = summarize(content)
+		s.updateTitle()
 	}
 }
 
@@ -325,6 +280,43 @@ func (s *Session) SetTitle(title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.title = title
+	s.updateTitle()
+}
+
+// updateTitle rewrites the first line of the session file with the updated title.
+func (s *Session) updateTitle() {
+	if s.file == nil {
+		return
+	}
+
+	filename := filepath.Join(s.sessionsDir, s.id+".jsonl")
+
+	// Read all lines
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 {
+		return
+	}
+
+	// Parse and update the first line
+	var firstEvent Event
+	if err := json.Unmarshal([]byte(lines[0]), &firstEvent); err != nil {
+		return
+	}
+
+	firstEvent.Title = s.title
+	updatedFirst, err := json.Marshal(firstEvent)
+	if err != nil {
+		return
+	}
+
+	// Write back
+	lines[0] = string(updatedFirst)
+	os.WriteFile(filename, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
 // ID returns the session's unique identifier.
@@ -332,9 +324,9 @@ func (s *Session) ID() string {
 	return s.id
 }
 
-// Dir returns the session directory path.
+// Dir returns the session file path (for compatibility with old API).
 func (s *Session) Dir() string {
-	return s.dir
+	return filepath.Join(s.sessionsDir, s.id+".jsonl")
 }
 
 // Title returns the session's title (summarized first message).
@@ -345,13 +337,8 @@ func (s *Session) Title() string {
 }
 
 // History reads all events from a session file and returns them.
-func History(dir string) ([]Event, error) {
-	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	if err != nil || len(files) == 0 {
-		return nil, fmt.Errorf("no session file in %s", dir)
-	}
-
-	data, err := os.ReadFile(files[0])
+func History(filepath string) ([]Event, error) {
+	data, err := os.ReadFile(filepath)
 	if err != nil {
 		return nil, fmt.Errorf("read session file: %w", err)
 	}
@@ -364,43 +351,9 @@ func History(dir string) ([]Event, error) {
 			continue
 		}
 
-		var entry historyEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		var ev Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			continue
-		}
-
-		ev := Event{
-			Type:      entry.Type,
-			ID:        entry.ID,
-			Timestamp: entry.Timestamp,
-			Provider:  entry.Provider,
-			Model:     entry.Model,
-		}
-		if entry.ParentID != nil {
-			ev.ParentID = entry.ParentID
-		}
-
-		// Reconstruct the appropriate typed field.
-		switch entry.Type {
-		case "session":
-			if entry.Message != nil {
-				var msg Message
-				if err := json.Unmarshal(*entry.Message, &msg); err == nil {
-					ev.Message = &json.RawMessage{}
-					*ev.Message = *entry.Message
-				}
-			}
-		case "message":
-			if entry.Message != nil {
-				ev.Message = entry.Message
-			}
-			if entry.ToolResult != nil {
-				var tr ToolCallResult
-				if err := json.Unmarshal(*entry.ToolResult, &tr); err == nil {
-					ev.ToolResult = &json.RawMessage{}
-					*ev.ToolResult = *entry.ToolResult
-				}
-			}
 		}
 
 		events = append(events, ev)
@@ -409,67 +362,82 @@ func History(dir string) ([]Event, error) {
 	return events, nil
 }
 
-// List returns summaries of all sessions, newest first.
-func List() ([]Summary, error) {
-	baseDir := configDir
-	if baseDir == "" {
-		var err error
-		baseDir, err = os.UserConfigDir()
-		if err != nil {
-			baseDir = "."
-		}
-	}
+// summaryWithModTime is used internally for sorting sessions by modification time.
+type summaryWithModTime struct {
+	Summary
+	modTime time.Time
+}
 
-	sessionsDir := filepath.Join(baseDir, configDirName, sessionsSubDir)
+// List returns summaries of all sessions in the specified directory, newest first (by file modification time).
+func List(sessionsDir string) ([]Summary, error) {
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return []Summary{}, nil
 		}
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
 
-	var summaries []Summary
+	var summariesWithTime []summaryWithModTime
 	for _, e := range entries {
-		if e.IsDir() {
-			name := e.Name()
-			if idx := strings.Index(name, "_"); idx > 0 {
-				id := name[idx+1:]
-				dir := filepath.Join(sessionsDir, name)
-				title := ""
-				ts := ""
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
 
-				// Read the JSONL to extract title and timestamp.
-				sessions, histErr := History(dir)
-				if histErr == nil {
-					for _, ev := range sessions {
-						if ev.Type == "message" && ev.Message != nil {
-							var msg Message
-							if err := json.Unmarshal(*ev.Message, &msg); err == nil {
-								if msg.Role == "user" && title == "" {
-									title = summarize(msg.Content)
-								}
-							}
-						}
-						if ev.Type == "session" && ts == "" {
-							ts = ev.Timestamp
+		// Extract session ID from filename (remove .jsonl extension)
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		filepath := filepath.Join(sessionsDir, e.Name())
+
+		// Get file info for timestamp
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+
+		// Read first line to get title
+		events, err := History(filepath)
+		if err != nil || len(events) == 0 {
+			continue
+		}
+
+		title := events[0].Title
+		timestamp := events[0].Timestamp
+
+		// If title is empty in the header, extract from first user message
+		if title == "" {
+			for _, ev := range events {
+				if ev.Type == "message" && ev.Message != nil {
+					var msg Message
+					if err := json.Unmarshal(*ev.Message, &msg); err == nil {
+						if msg.Role == "user" {
+							title = summarize(msg.Content)
+							break
 						}
 					}
 				}
-
-				summaries = append(summaries, Summary{
-					ID:        id,
-					Title:     title,
-					Timestamp: ts,
-				})
 			}
 		}
+
+		summariesWithTime = append(summariesWithTime, summaryWithModTime{
+			Summary: Summary{
+				ID:        id,
+				Title:     title,
+				Timestamp: timestamp,
+			},
+			modTime: info.ModTime(),
+		})
 	}
 
-	// Sort newest first (directories are named with timestamps).
-	sort.Slice(summaries, func(i, j int) bool {
-		return summaries[i].Timestamp > summaries[j].Timestamp
+	// Sort newest first by modification time
+	sort.Slice(summariesWithTime, func(i, j int) bool {
+		return summariesWithTime[i].modTime.After(summariesWithTime[j].modTime)
 	})
+
+	// Extract just the summaries
+	summaries := make([]Summary, len(summariesWithTime))
+	for i, s := range summariesWithTime {
+		summaries[i] = s.Summary
+	}
 
 	return summaries, nil
 }
@@ -497,19 +465,6 @@ func generateSessionID() string {
 func pwd() string {
 	cwd, _ := os.Getwd()
 	return cwd
-}
-
-// historyEntry is a single deserialized JSONL line.
-type historyEntry struct {
-	Type       string          `json:"type"`
-	ID         string          `json:"id"`
-	ParentID   *string         `json:"parentId,omitempty"`
-	Timestamp  string          `json:"timestamp"`
-	Message    *json.RawMessage `json:"message,omitempty"`
-	ToolCall   *json.RawMessage `json:"tool_call,omitempty"`
-	ToolResult *json.RawMessage `json:"tool_result,omitempty"`
-	Provider   string          `json:"provider,omitempty"`
-	Model      string          `json:"model,omitempty"`
 }
 
 // summarize creates a short title from a message's content.
