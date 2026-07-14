@@ -28,7 +28,6 @@ var homeTemplates embed.FS
 //go:embed templates/layout.html templates/chat.html
 var chatTemplates embed.FS
 
-var templates *template.Template
 var indexTemplate *template.Template
 var chatTemplate *template.Template
 
