@@ -1,0 +1,29 @@
+{{template "layout.html" .}}
+
+{{define "content"}}
+<div id="chat-view">
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">disconnected</span>
+  </div>
+
+  <div id="messages">
+    <div class="message system">Test</div>
+    {{range .Messages}}
+    <div class="message {{.Role}}">{{.Content}}</div>
+    {{else}}
+    <!-- No messages yet -->
+    {{end}}
+  </div>
+
+  <div id="input-area">
+    <textarea id="input" placeholder="Ask me Almost anything..." rows="1"></textarea>
+    <button id="send-btn">Send</button>
+  </div>
+</div>
+
+<script>
+  // Set current session ID for JavaScript
+  window.currentSessionId = "{{.SessionID}}";
+</script>
+{{end}}

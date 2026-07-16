@@ -63,6 +63,15 @@ func ConfigDir() (string, error) {
 	return filepath.Join(dir, "majordomo"), nil
 }
 
+// SessionsDir returns the directory where session files are stored.
+func SessionsDir() (string, error) {
+	base, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "sessions"), nil
+}
+
 func configPath() string {
 	dir, err := ConfigDir()
 	if err != nil {

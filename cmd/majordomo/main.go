@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/julython/majordomo/internal/config"
-	"github.com/julython/majordomo/internal/server"
+	"github.com/rmyers/majordomo/config"
+	"github.com/rmyers/majordomo/server"
 )
 
 func main() {
@@ -27,8 +27,15 @@ func main() {
 	}
 	slog.Info("Using config", "provider", cfg.LLM.Provider, "model", cfg.LLM.Model, "url", cfg.LLM.URL)
 
+	// Get sessions directory
+	sessionsDir, err := config.SessionsDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to get sessions directory: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Start the server
-	srv := server.New(*port)
+	srv := server.New(*port, sessionsDir)
 	if err := srv.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)

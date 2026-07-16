@@ -1,3 +1,3 @@
-module github.com/julython/majordomo
+module github.com/rmyers/majordomo
 
 go 1.26

@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/julython/majordomo/internal/config"
+	"github.com/rmyers/majordomo/config"
 )
 
 // Message represents a single message in a conversation.
