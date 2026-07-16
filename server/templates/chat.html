@@ -8,6 +8,7 @@
   </div>
 
   <div id="messages">
+    <div class="message system">Test</div>
     {{range .Messages}}
     <div class="message {{.Role}}">{{.Content}}</div>
     {{else}}
@@ -16,7 +17,7 @@
   </div>
 
   <div id="input-area">
-    <textarea id="input" placeholder="Ask me anything..." rows="1"></textarea>
+    <textarea id="input" placeholder="Ask me Almost anything..." rows="1"></textarea>
     <button id="send-btn">Send</button>
   </div>
 </div>
