@@ -22,7 +22,15 @@ import (
 //go:embed templates/*.html styles.css app.js
 var webFS embed.FS
 
+//go:embed templates/layout.html templates/index.html
+var homeTemplates embed.FS
+
+//go:embed templates/layout.html templates/chat.html
+var chatTemplates embed.FS
+
 var templates *template.Template
+var indexTemplate *template.Template
+var chatTemplate *template.Template
 
 // Server serves the web interface and SSE agent stream.
 type Server struct {
@@ -48,7 +56,11 @@ func (s *Server) Run(cfg *config.Config) error {
 
 	// Parse templates
 	var err error
-	templates, err = template.ParseFS(webFS, "templates/*.html")
+	indexTemplate, err = template.ParseFS(homeTemplates, "templates/*.html")
+	if err != nil {
+		return fmt.Errorf("failed to parse templates: %w", err)
+	}
+	chatTemplate, err = template.ParseFS(chatTemplates, "templates/*.html")
 	if err != nil {
 		return fmt.Errorf("failed to parse templates: %w", err)
 	}
@@ -58,9 +70,6 @@ func (s *Server) Run(cfg *config.Config) error {
 	// Serve static assets
 	mux.Handle("/styles.css", http.FileServer(http.FS(webFS)))
 	mux.Handle("/app.js", http.FileServer(http.FS(webFS)))
-
-	// Serve the web UI from the embedded filesystem.
-	mux.HandleFunc("/", s.handleRoot)
 
 	// Config API endpoints.
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -79,6 +88,9 @@ func (s *Server) Run(cfg *config.Config) error {
 	mux.HandleFunc("/api/stream", func(w http.ResponseWriter, r *http.Request) {
 		s.handleStream(w, r)
 	})
+
+	// Serve the web UI from the embedded filesystem.
+	mux.HandleFunc("/", s.handleRoot)
 
 	slog.Info("server starting", "addr", s.addr)
 	return http.ListenAndServe(s.addr, mux)
@@ -114,7 +126,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := templates.ExecuteTemplate(w, "index.html", data); err != nil {
+	if err := indexTemplate.ExecuteTemplate(w, "layout", data); err != nil {
 		slog.Error("failed to render template", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -256,6 +268,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	slog.Error("found messages", "messages", messages)
 
 	// Load all sessions for sidebar
 	summaries, err := session.List(s.sessionsDir)
@@ -276,7 +289,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := templates.ExecuteTemplate(w, "chat.html", data); err != nil {
+	if err := chatTemplate.ExecuteTemplate(w, "layout", data); err != nil {
 		slog.Error("failed to render chat template", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
