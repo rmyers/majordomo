@@ -65,6 +65,9 @@ func ConfigDir() (string, error) {
 
 // SessionsDir returns the directory where session files are stored.
 func SessionsDir() (string, error) {
+	if dir := os.Getenv("MAJORDOMO_TEST_SESSIONS_DIR"); dir != "" {
+		return dir, nil
+	}
 	base, err := ConfigDir()
 	if err != nil {
 		return "", err

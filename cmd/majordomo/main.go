@@ -8,6 +8,7 @@ import (
 
 	"github.com/rmyers/majordomo/config"
 	"github.com/rmyers/majordomo/server"
+	"github.com/rmyers/majordomo/session"
 )
 
 func main() {
@@ -19,7 +20,6 @@ func main() {
 	configPath := flag.String("config", "", "path to config.json (default: ~/.majordomo/config.json)")
 	flag.Parse()
 
-	// Load configuration
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		slog.Warn("using default config", "error", err)
@@ -27,15 +27,8 @@ func main() {
 	}
 	slog.Info("Using config", "provider", cfg.LLM.Provider, "model", cfg.LLM.Model, "url", cfg.LLM.URL)
 
-	// Get sessions directory
-	sessionsDir, err := config.SessionsDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to get sessions directory: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Start the server
-	srv := server.New(*port, sessionsDir)
+	svc := session.NewSessionService(cfg)
+	srv := server.New(*port, svc)
 	if err := srv.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
