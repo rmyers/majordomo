@@ -147,43 +147,56 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 // handleGetConfig returns the current config as JSON.
 func (s *Server) handleGetConfig(w http.ResponseWriter) {
 	cfg := s.getConfig()
+	resp := struct {
+		Model  string `json:"model"`
+		URL    string `json:"url"`
+		APIKey string `json:"apiKey"`
+	}{
+		Model:  cfg.GetModel(),
+		URL:    cfg.GetURL(),
+		APIKey: cfg.GetAPIKey(),
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(cfg)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handlePostConfig saves a new config from the request body.
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
-	var newCfg config.Config
-	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+	var body struct {
+		Model string `json:"model"`
+		URL   string `json:"url"`
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	// Validate provider
-	if newCfg.LLM.Provider != "auto" && newCfg.LLM.Provider != "ollama" &&
-		newCfg.LLM.Provider != "lmstudio" && newCfg.LLM.Provider != "llamacpp" &&
-		newCfg.LLM.Provider != "omlx" && newCfg.LLM.Provider != "" {
-		http.Error(w, "invalid provider", http.StatusBadRequest)
+	cfg := s.getConfig()
+	if cfg == nil {
+		http.Error(w, "config not initialized", http.StatusInternalServerError)
 		return
 	}
 
-	// Save to disk
-	if err := config.Save(&newCfg); err != nil {
+	// Preserve existing API key if not provided in the request.
+	if body.APIKey == "" {
+		body.APIKey = cfg.GetAPIKey()
+	}
+
+	cfg.SetModel(body.Model)
+	cfg.SetURL(body.URL)
+	cfg.SetAPIKey(body.APIKey)
+
+	if err := cfg.Save(); err != nil {
 		slog.Error("failed to save config", "error", err)
 		http.Error(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
 
-	// Update in-memory config
-	s.mu.Lock()
-	s.cfg = &newCfg
-	s.mu.Unlock()
+	slog.Info("config updated", "model", cfg.GetModel(), "url", cfg.GetURL())
 
-	slog.Info("config updated", "provider", newCfg.LLM.Provider, "model", newCfg.LLM.Model, "url", newCfg.LLM.URL)
-
-	// Return saved config
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(newCfg)
+	json.NewEncoder(w).Encode(cfg)
 }
 
 // handleSessions handles GET (list) and POST (create) for /api/sessions.
@@ -391,7 +404,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	if sess != nil {
 		slog.Info("session", "id", sess.ID(), "title", sess.Title())
-		sess.RecordModel(client.Name(), cfg.LLM.Model)
+		sess.RecordModel(cfg.LLM.Model)
 		defer sess.Close()
 	}
 

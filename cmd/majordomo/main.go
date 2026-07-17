@@ -17,18 +17,17 @@ func main() {
 	})))
 
 	port := flag.String("port", ":3636", "HTTP listen address (host:port)")
-	configPath := flag.String("config", "", "path to config.json (default: ~/.majordomo/config.json)")
+	configDir := flag.String("config", "", "directory for config.json and sessions (default: ~/.config/majordomo)")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
-	if err != nil {
+	cfg := config.New(*configDir)
+	if err := cfg.Load(); err != nil {
 		slog.Warn("using default config", "error", err)
-		cfg = config.Default()
 	}
-	slog.Info("Using config", "provider", cfg.LLM.Provider, "model", cfg.LLM.Model, "url", cfg.LLM.URL)
+	slog.Info("Using config", "model", cfg.GetModel(), "url", cfg.GetURL())
 
-	svc := session.NewSessionService(cfg)
-	srv := server.New(*port, svc)
+	sessionService := session.NewSessionService(cfg)
+	srv := server.New(*port, sessionService)
 	if err := srv.Run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)

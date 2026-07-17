@@ -272,8 +272,8 @@ func (s *Session) RecordToolResult(callID string, output string, errStr string, 
 	})
 }
 
-// RecordModel records which LLM provider and model were used for this session.
-func (s *Session) RecordModel(provider string, model string) {
+// RecordModel records which LLM model was used for this session.
+func (s *Session) RecordModel(model string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -281,7 +281,6 @@ func (s *Session) RecordModel(provider string, model string) {
 		Type:      "model_change",
 		ID:        fmt.Sprintf("%08x", s.iteration+1),
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Provider:  provider,
 		Model:     model,
 	})
 }
@@ -485,7 +484,7 @@ func NewSessionService(cfg *config.Config) *SessionService {
 
 // sessionsDir returns the sessions directory from the config.
 func (svc *SessionService) sessionsDir() (string, error) {
-	return config.SessionsDir()
+	return svc.cfg.GetSessionsDir()
 }
 
 // CreateSession creates a new session with the given content as the first user message.

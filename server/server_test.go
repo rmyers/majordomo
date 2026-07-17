@@ -21,15 +21,11 @@ func setupTestServer(t *testing.T) (*Server, string) {
 
 	tmpDir := t.TempDir()
 	sessionsDir := filepath.Join(tmpDir, "sessions")
-	os.Setenv("MAJORDOMO_TEST_SESSIONS_DIR", sessionsDir)
+	os.MkdirAll(sessionsDir, 0o755)
 
-	cfg := &config.Config{
-		LLM: config.LLMConfig{
-			Provider: "ollama",
-			Model:    "test-model",
-			URL:      "http://localhost:11434",
-		},
-	}
+	cfg := config.New(tmpDir)
+	cfg.SetModel("test-model")
+	cfg.SetURL("http://localhost:11434")
 
 	svc := session.NewSessionService(cfg)
 	srv := New(":0", svc)
@@ -62,7 +58,7 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	srv.cfg = cfg
 	srv.mu.Unlock()
 
-	return srv, sessionsDir
+	return srv, tmpDir
 }
 
 func TestTemplateParsing(t *testing.T) {
@@ -203,7 +199,7 @@ func TestHandleChatNonExistentSession(t *testing.T) {
 }
 
 func TestHandleAPIConfig(t *testing.T) {
-	srv, _ := setupTestServer(t)
+	srv, configDir := setupTestServer(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/config", srv.handleConfig)
@@ -216,23 +212,24 @@ func TestHandleAPIConfig(t *testing.T) {
 		t.Errorf("handleConfig GET status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var cfg config.Config
-	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+	var resp struct {
+		Model  string `json:"model"`
+		URL    string `json:"url"`
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to parse config response: %v", err)
 	}
 
-	if cfg.LLM.Provider != "ollama" {
-		t.Errorf("expected provider 'ollama', got '%s'", cfg.LLM.Provider)
+	if resp.Model != "test-model" {
+		t.Errorf("expected model 'test-model', got '%s'", resp.Model)
 	}
 
-	newCfg := config.Config{
-		LLM: config.LLMConfig{
-			Provider: "lmstudio",
-			Model:    "llama3.2",
-			URL:      "http://localhost:1234",
-		},
-	}
-	body, err := json.Marshal(newCfg)
+	body, err := json.Marshal(map[string]string{
+		"model":  "llama3.2",
+		"url":    "http://localhost:1234",
+		"apiKey": "test-api-key",
+	})
 	if err != nil {
 		t.Fatalf("failed to marshal config: %v", err)
 	}
@@ -245,6 +242,34 @@ func TestHandleAPIConfig(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Errorf("handleConfig POST status = %d, want %d", rec2.Code, http.StatusOK)
 		t.Logf("body: %s", rec2.Body.String())
+	}
+
+	// Verify config was written to the temp directory.
+	configFile := filepath.Join(configDir, "config.json")
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatalf("config.json not found in temp dir: %v", err)
+	}
+
+	var saved struct {
+		LLM struct {
+			Model  string `json:"model"`
+			URL    string `json:"url"`
+			APIKey string `json:"apiKey"`
+		} `json:"llm"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("failed to parse saved config: %v", err)
+	}
+
+	if saved.LLM.Model != "llama3.2" {
+		t.Errorf("expected saved model 'llama3.2', got '%s'", saved.LLM.Model)
+	}
+	if saved.LLM.URL != "http://localhost:1234" {
+		t.Errorf("expected saved URL 'http://localhost:1234', got '%s'", saved.LLM.URL)
+	}
+	if saved.LLM.APIKey != "test-api-key" {
+		t.Errorf("expected saved apiKey 'test-api-key', got '%s'", saved.LLM.APIKey)
 	}
 }
 

@@ -3,11 +3,9 @@ const settingsBtn = document.getElementById('settings-btn');
 const configModal = document.getElementById('config-modal');
 const configStatus = document.getElementById('config-status');
 
-const cfgProvider = document.getElementById('cfg-provider');
 const cfgModel = document.getElementById('cfg-model');
 const cfgUrl = document.getElementById('cfg-url');
 const cfgApiKey = document.getElementById('cfg-apikey');
-const cfgDetect = document.getElementById('cfg-detect');
 const cfgSave = document.getElementById('cfg-save');
 const cfgCancel = document.getElementById('cfg-cancel');
 
@@ -28,21 +26,11 @@ configModal.addEventListener('click', (e) => {
   }
 });
 
-cfgDetect.addEventListener('click', () => {
-  cfgProvider.value = 'auto';
-  cfgModel.value = '';
-  cfgUrl.value = '';
-  setConfigStatus('Set to auto-detect. The server will probe for local LLMs on startup.', 'success');
-});
-
 cfgSave.addEventListener('click', () => {
   const cfg = {
-    llm: {
-      provider: cfgProvider.value,
-      model: cfgModel.value.trim(),
-      url: cfgUrl.value.trim(),
-      apiKey: cfgApiKey.value.trim(),
-    },
+    model: cfgModel.value.trim(),
+    url: cfgUrl.value.trim(),
+    apiKey: cfgApiKey.value.trim(),
   };
 
   fetch('/api/config', {
@@ -72,9 +60,8 @@ async function loadConfig() {
   try {
     const res = await fetch('/api/config');
     const cfg = await res.json();
-    cfgProvider.value = cfg.llm.provider || 'auto';
-    cfgModel.value = cfg.llm.model || '';
-    cfgUrl.value = cfg.llm.url || '';
+    cfgModel.value = cfg.model || '';
+    cfgUrl.value = cfg.url || '';
     cfgApiKey.value = '';
   } catch (err) {
     setConfigStatus(`Failed to load config: ${err.message}`, 'error');
