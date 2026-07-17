@@ -6,76 +6,105 @@ import (
 	"path/filepath"
 )
 
-// Config holds the application configuration.
+// Config holds the application configuration and manages its own persistence.
 type Config struct {
-	LLM LLMConfig `json:"llm"`
+	dir     string
+	LLM     LLMConfig `json:"llm"`
 }
 
 // LLMConfig holds settings for the local LLM server.
 type LLMConfig struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	URL      string `json:"url"`
-	APIKey   string `json:"apiKey,omitempty"`
+	Model  string `json:"model"`
+	URL    string `json:"url"`
+	APIKey string `json:"apiKey,omitempty"`
 }
 
-// Default returns a Config with auto-detection enabled for local LLM servers.
+// New creates a Config that reads/writes to the given directory.
+// If dir is empty, uses the default user config directory (~/.config/majordomo).
+func New(dir string) *Config {
+	if dir == "" {
+		dir = defaultDir()
+	}
+	return &Config{dir: dir}
+}
+
+// Default returns a Config with no settings, using the default directory.
 func Default() *Config {
-	return &Config{
-		LLM: LLMConfig{Provider: "auto", Model: "", URL: ""},
-	}
+	return New("")
 }
 
-// Load reads a config file from the given path.
-// If path is empty, uses the default config directory.
-func Load(path string) (*Config, error) {
-	if path == "" {
-		path = configPath()
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	cfg := Default()
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
+// Dir returns the directory this config reads from and writes to.
+func (c *Config) Dir() string {
+	return c.dir
 }
 
-// Save writes the config to disk.
-func Save(cfg *Config) error {
-	path := configPath()
-	os.MkdirAll(filepath.Dir(path), 0o755)
-	data, err := json.MarshalIndent(cfg, "", "  ")
+// Path returns the full path to the config file.
+func (c *Config) Path() string {
+	return filepath.Join(c.dir, "config.json")
+}
+
+// Load reads the config file from disk and merges it on top of defaults.
+func (c *Config) Load() error {
+	data, err := os.ReadFile(c.Path())
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	if err := json.Unmarshal(data, c); err != nil {
+		return err
+	}
+	return nil
 }
 
-// ConfigDir returns the base directory where config and session data live.
-func ConfigDir() (string, error) {
+// Save writes the config to disk.
+func (c *Config) Save() error {
+	os.MkdirAll(c.dir, 0o755)
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(c.Path(), data, 0o644)
+}
+
+// GetModel returns the configured model name.
+func (c *Config) GetModel() string {
+	return c.LLM.Model
+}
+
+// SetModel sets the model name.
+func (c *Config) SetModel(model string) {
+	c.LLM.Model = model
+}
+
+// GetURL returns the configured server URL.
+func (c *Config) GetURL() string {
+	return c.LLM.URL
+}
+
+// SetURL sets the server URL.
+func (c *Config) SetURL(url string) {
+	c.LLM.URL = url
+}
+
+// GetAPIKey returns the configured API key.
+func (c *Config) GetAPIKey() string {
+	return c.LLM.APIKey
+}
+
+// SetAPIKey sets the API key.
+func (c *Config) SetAPIKey(key string) {
+	c.LLM.APIKey = key
+}
+
+// GetSessionsDir returns the directory where session files are stored.
+func (c *Config) GetSessionsDir() (string, error) {
+	return filepath.Join(c.dir, "sessions"), nil
+}
+
+// defaultDir returns the default config directory.
+func defaultDir() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		dir = "."
 	}
-	return filepath.Join(dir, "majordomo"), nil
-}
-
-// SessionsDir returns the directory where session files are stored.
-func SessionsDir() (string, error) {
-	base, err := ConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "sessions"), nil
-}
-
-func configPath() string {
-	dir, err := ConfigDir()
-	if err != nil {
-		dir = "."
-	}
-	return filepath.Join(dir, "config.json")
+	return filepath.Join(dir, "majordomo")
 }

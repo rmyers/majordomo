@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rmyers/majordomo/config"
 	"github.com/rmyers/majordomo/llm"
 )
 
@@ -50,7 +52,7 @@ type Event struct {
 // Message represents a single message in the session (user, assistant, or tool).
 type Message struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
+	Content    string     `json:"content"`
 	Thinking   string     `json:"thinking,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
@@ -106,21 +108,26 @@ func New(sessionsDir string) (*Session, error) {
 		sessionsDir: sessionsDir,
 	}
 
-	// Write the session header record.
+	return s, nil
+}
+
+// writeSessionHeader writes the session header line to the file.
+// This is called when the first user message is recorded.
+func (s *Session) writeSessionHeader(title string) {
+	s.title = title
+	ts := s.timestamp.Format(time.RFC3339Nano)
 	header, _ := json.Marshal(&Message{
 		Role: "system",
 		Content: fmt.Sprintf(`{"version":%d,"id":"%s","timestamp":"%s","cwd":"%s"}`,
-			sessionFileVersion, id, ts.Format(time.RFC3339Nano), pwd()),
+			sessionFileVersion, s.id, ts, pwd()),
 	})
 	s.writeEvent(Event{
 		Type:      "session",
-		ID:        id,
-		Timestamp: ts.Format(time.RFC3339Nano),
+		ID:        s.id,
+		Timestamp: ts,
 		Message:   (*json.RawMessage)(&header),
-		Title:     "", // will be updated after first user message
+		Title:     title,
 	})
-
-	return s, nil
 }
 
 // Open resumes an existing session by its ID from the specified sessions directory.
@@ -215,19 +222,20 @@ func (s *Session) RecordMessage(role string, content string, toolCalls []llm.Too
 		ToolCallID: "",
 	})
 
+	// If this is the first user message, write the session header with the title before the message.
+	if role == "user" && s.title == "" {
+		s.title = summarize(content)
+		s.writeSessionHeader(s.title)
+	}
+
+	msgCopy := json.RawMessage(msg)
 	s.writeEvent(Event{
 		Type:      "message",
 		ID:        id,
 		ParentID:  parentID,
 		Timestamp: ts,
-		Message:   (*json.RawMessage)(&msg),
+		Message:   &msgCopy,
 	})
-
-	// If this is the first user message and no title yet, summarize it and update the header.
-	if role == "user" && s.title == "" {
-		s.title = summarize(content)
-		s.updateTitle()
-	}
 }
 
 // RecordToolResult records the result of a tool execution.
@@ -246,23 +254,26 @@ func (s *Session) RecordToolResult(callID string, output string, errStr string, 
 		Content:    output,
 		ToolCallID: callID,
 	})
+	toolMsgCopy := json.RawMessage(toolMsg)
+
 	tr, _ := json.Marshal(&ToolCallResult{
 		Output: output,
 		Error:  errStr,
 	})
+	trCopy := json.RawMessage(tr)
 
 	s.writeEvent(Event{
 		Type:       "message",
 		ID:         id,
 		ParentID:   &parentId,
 		Timestamp:  ts,
-		Message:    (*json.RawMessage)(&toolMsg),
-		ToolResult: (*json.RawMessage)(&tr),
+		Message:    &toolMsgCopy,
+		ToolResult: &trCopy,
 	})
 }
 
-// RecordModel records which LLM provider and model were used for this session.
-func (s *Session) RecordModel(provider string, model string) {
+// RecordModel records which LLM model was used for this session.
+func (s *Session) RecordModel(model string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -270,7 +281,6 @@ func (s *Session) RecordModel(provider string, model string) {
 		Type:      "model_change",
 		ID:        fmt.Sprintf("%08x", s.iteration+1),
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Provider:  provider,
 		Model:     model,
 	})
 }
@@ -280,43 +290,6 @@ func (s *Session) SetTitle(title string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.title = title
-	s.updateTitle()
-}
-
-// updateTitle rewrites the first line of the session file with the updated title.
-func (s *Session) updateTitle() {
-	if s.file == nil {
-		return
-	}
-
-	filename := filepath.Join(s.sessionsDir, s.id+".jsonl")
-
-	// Read all lines
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return
-	}
-
-	lines := strings.Split(string(data), "\n")
-	if len(lines) == 0 {
-		return
-	}
-
-	// Parse and update the first line
-	var firstEvent Event
-	if err := json.Unmarshal([]byte(lines[0]), &firstEvent); err != nil {
-		return
-	}
-
-	firstEvent.Title = s.title
-	updatedFirst, err := json.Marshal(firstEvent)
-	if err != nil {
-		return
-	}
-
-	// Write back
-	lines[0] = string(updatedFirst)
-	os.WriteFile(filename, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
 // ID returns the session's unique identifier.
@@ -451,7 +424,15 @@ func (s *Session) writeEvent(ev Event) {
 	if err != nil {
 		return
 	}
-	s.file.Write(append(data, '\n'))
+	line := append(data, '\n')
+	slog.Debug("writing event to file", "event", string(data))
+	if _, err := s.file.Write(line); err != nil {
+		slog.Error("failed to write event", "error", err)
+		return
+	}
+	if err := s.file.Sync(); err != nil {
+		slog.Error("failed to sync event file", "error", err)
+	}
 }
 
 // generateSessionID creates a short unique identifier (8 hex chars).
@@ -488,4 +469,71 @@ func summarize(content string) string {
 		return content[:maxLen-1] + "…"
 	}
 	return content
+}
+
+// SessionService provides a high-level interface to session operations.
+// It owns the config reference and derives the sessions directory from it.
+type SessionService struct {
+	cfg *config.Config
+}
+
+// NewSessionService creates a new SessionService from the given config.
+func NewSessionService(cfg *config.Config) *SessionService {
+	return &SessionService{cfg: cfg}
+}
+
+// sessionsDir returns the sessions directory from the config.
+func (svc *SessionService) sessionsDir() (string, error) {
+	return svc.cfg.GetSessionsDir()
+}
+
+// CreateSession creates a new session with the given content as the first user message.
+// It writes the session header with a title derived from the content, then writes
+// the user message event. Returns the created session.
+// When content is empty, only the session header is written (no user message).
+func (svc *SessionService) CreateSession(content string) (*Session, error) {
+	sessionsDir, err := svc.sessionsDir()
+	if err != nil {
+		return nil, fmt.Errorf("get sessions directory: %w", err)
+	}
+
+	sess, err := New(sessionsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	sess.writeSessionHeader(summarize(content))
+	if content != "" {
+		sess.RecordMessage("user", content, nil, "")
+	}
+
+	return sess, nil
+}
+
+// ListSessions returns summaries of all sessions.
+func (svc *SessionService) ListSessions() ([]Summary, error) {
+	sessionsDir, err := svc.sessionsDir()
+	if err != nil {
+		return nil, fmt.Errorf("get sessions directory: %w", err)
+	}
+	return List(sessionsDir)
+}
+
+// OpenSession opens an existing session by ID.
+func (svc *SessionService) OpenSession(id string) (*Session, error) {
+	sessionsDir, err := svc.sessionsDir()
+	if err != nil {
+		return nil, fmt.Errorf("get sessions directory: %w", err)
+	}
+	return Open(id, sessionsDir)
+}
+
+// SessionHistory returns all events from a session file by session ID.
+func (svc *SessionService) SessionHistory(id string) ([]Event, error) {
+	sessionsDir, err := svc.sessionsDir()
+	if err != nil {
+		return nil, fmt.Errorf("get sessions directory: %w", err)
+	}
+	sessionFile := filepath.Join(sessionsDir, id+".jsonl")
+	return History(sessionFile)
 }

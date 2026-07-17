@@ -8,7 +8,6 @@
   </div>
 
   <div id="messages">
-    <div class="message system">Test</div>
     {{range .Messages}}
     <div class="message {{.Role}}">{{.Content}}</div>
     {{else}}

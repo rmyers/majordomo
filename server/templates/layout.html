@@ -47,19 +47,8 @@
       <h2>LLM Configuration</h2>
 
       <div class="config-field">
-        <label for="cfg-provider">Provider</label>
-        <select id="cfg-provider">
-          <option value="auto">Auto-detect</option>
-          <option value="ollama">Ollama</option>
-          <option value="omlx">Omlx</option>
-          <option value="lmstudio">LM Studio</option>
-          <option value="llamacpp">llama.cpp</option>
-        </select>
-      </div>
-
-      <div class="config-field">
         <label for="cfg-model">Model name (leave empty for default)</label>
-        <input type="text" id="cfg-model" placeholder="e.g. llama3.2">
+        <input type="text" id="cfg-model" placeholder="e.g. mistral, llama">
       </div>
 
       <div class="config-field">
@@ -68,12 +57,11 @@
       </div>
 
       <div class="config-field">
-        <label for="cfg-apikey">API Key (optional)</label>
+        <label for="cfg-apikey">API Key (optional, preserved when saved)</label>
         <input type="password" id="cfg-apikey" placeholder="Bearer token">
       </div>
 
       <div class="config-actions">
-        <button id="cfg-detect">Detect Server</button>
         <button id="cfg-save" class="primary">Save</button>
         <button id="cfg-cancel">Cancel</button>
       </div>

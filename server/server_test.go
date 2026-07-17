@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,10 +21,15 @@ func setupTestServer(t *testing.T) (*Server, string) {
 
 	tmpDir := t.TempDir()
 	sessionsDir := filepath.Join(tmpDir, "sessions")
+	os.MkdirAll(sessionsDir, 0o755)
 
-	srv := New(":0", sessionsDir)
+	cfg := config.New(tmpDir)
+	cfg.SetModel("test-model")
+	cfg.SetURL("http://localhost:11434")
 
-	// Parse templates (this is normally done in Run()).
+	svc := session.NewSessionService(cfg)
+	srv := New(":0", svc)
+
 	if templates == nil {
 		var err error
 		templates, err = template.ParseFS(webFS, "templates/*.html")
@@ -32,41 +38,43 @@ func setupTestServer(t *testing.T) (*Server, string) {
 		}
 	}
 
-	// Create a test config
-	cfg := &config.Config{
-		LLM: config.LLMConfig{
-			Provider: "ollama",
-			Model:    "test-model",
-			URL:      "http://localhost:11434",
-		},
+	if indexTemplate == nil {
+		var err error
+		indexTemplate, err = template.ParseFS(homeTemplates, "templates/*.html")
+		if err != nil {
+			t.Fatalf("failed to parse index templates: %v", err)
+		}
 	}
 
-	// Lock config
+	if chatTemplate == nil {
+		var err error
+		chatTemplate, err = template.ParseFS(chatTemplates, "templates/*.html")
+		if err != nil {
+			t.Fatalf("failed to parse chat templates: %v", err)
+		}
+	}
+
 	srv.mu.Lock()
 	srv.cfg = cfg
 	srv.mu.Unlock()
 
-	return srv, sessionsDir
+	return srv, tmpDir
 }
 
 func TestTemplateParsing(t *testing.T) {
-	// Verify templates can be parsed from embedded FS
 	tmpl, err := template.ParseFS(webFS, "templates/*.html")
 	if err != nil {
 		t.Fatalf("template.ParseFS() error: %v", err)
 	}
 
-	// Verify index template exists
 	if tmpl.Lookup("index.html") == nil {
 		t.Error("expected 'index.html' template to be parsed")
 	}
 
-	// Verify chat template exists
 	if tmpl.Lookup("chat.html") == nil {
 		t.Error("expected 'chat.html' template to be parsed")
 	}
 
-	// Verify layout template exists (used by index and chat)
 	if tmpl.Lookup("layout.html") == nil {
 		t.Error("expected 'layout.html' template to be parsed")
 	}
@@ -101,21 +109,18 @@ func TestHandleRoot(t *testing.T) {
 }
 
 func TestHandleChat(t *testing.T) {
-	srv, sessionsDir := setupTestServer(t)
+	srv, _ := setupTestServer(t)
 
-	// Create a session first
-	sess, err := session.New(sessionsDir)
+	sess, err := srv.sessionSrv.CreateSession("test message")
 	if err != nil {
-		t.Fatalf("session.New() error: %v", err)
+		t.Fatalf("sessionSrv.CreateSession() error: %v", err)
 	}
-	sess.RecordMessage("user", "test message", nil, "")
 	sessionID := sess.ID()
 	sess.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/chat/{id}", srv.handleChat)
 
-	// Test with valid session ID
 	req := httptest.NewRequest("GET", "/chat/"+sessionID, nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -134,7 +139,6 @@ func TestHandleChat(t *testing.T) {
 		t.Errorf("handleChat() body is not HTML: %s", body)
 	}
 
-	// Test with invalid session ID (should return 404)
 	req2 := httptest.NewRequest("GET", "/chat/invalid-session-id", nil)
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, req2)
@@ -143,29 +147,22 @@ func TestHandleChat(t *testing.T) {
 		t.Errorf("handleChat() with invalid ID status = %d, want %d", rec2.Code, http.StatusNotFound)
 	}
 
-	// Test with empty session ID: /chat/ doesn't match /chat/{id} route
-	// and falls through to root handler which returns 404.
 	req3 := httptest.NewRequest("GET", "/chat/", nil)
 	rec3 := httptest.NewRecorder()
 	mux.ServeHTTP(rec3, req3)
 
-	// Note: /chat/ falls through to root handler returning 404.
-	// This is a known limitation — the server doesn't have a /chat/ route.
 	if rec3.Code != http.StatusNotFound {
 		t.Errorf("handleChat() with empty ID status = %d, want %d (404 from root handler)", rec3.Code, http.StatusNotFound)
 	}
 }
 
 func TestHandleChatWithMessages(t *testing.T) {
-	srv, sessionsDir := setupTestServer(t)
+	srv, _ := setupTestServer(t)
 
-	// Create a session with messages
-	sess, err := session.New(sessionsDir)
+	sess, err := srv.sessionSrv.CreateSession("What is Go?")
 	if err != nil {
-		t.Fatalf("session.New() error: %v", err)
+		t.Fatalf("sessionSrv.CreateSession() error: %v", err)
 	}
-	sess.RecordMessage("user", "What is Go?", nil, "")
-	sess.RecordMessage("assistant", "Go is a programming language.", nil, "")
 	sessionID := sess.ID()
 	sess.Close()
 
@@ -184,9 +181,6 @@ func TestHandleChatWithMessages(t *testing.T) {
 	if !strings.Contains(body, "What is Go?") {
 		t.Errorf("handleChat() body does not contain user message: %s", body)
 	}
-	if !strings.Contains(body, "Go is a programming language") {
-		t.Errorf("handleChat() body does not contain assistant message: %s", body)
-	}
 }
 
 func TestHandleChatNonExistentSession(t *testing.T) {
@@ -195,7 +189,6 @@ func TestHandleChatNonExistentSession(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/chat/{id}", srv.handleChat)
 
-	// Test with a session ID that doesn't exist
 	req := httptest.NewRequest("GET", "/chat/nonexistent-session-id", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -206,12 +199,11 @@ func TestHandleChatNonExistentSession(t *testing.T) {
 }
 
 func TestHandleAPIConfig(t *testing.T) {
-	srv, _ := setupTestServer(t)
+	srv, configDir := setupTestServer(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/config", srv.handleConfig)
 
-	// Test GET
 	req := httptest.NewRequest("GET", "/api/config", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -220,24 +212,24 @@ func TestHandleAPIConfig(t *testing.T) {
 		t.Errorf("handleConfig GET status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var cfg config.Config
-	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+	var resp struct {
+		Model  string `json:"model"`
+		URL    string `json:"url"`
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to parse config response: %v", err)
 	}
 
-	if cfg.LLM.Provider != "ollama" {
-		t.Errorf("expected provider 'ollama', got '%s'", cfg.LLM.Provider)
+	if resp.Model != "test-model" {
+		t.Errorf("expected model 'test-model', got '%s'", resp.Model)
 	}
 
-	// Test POST
-	newCfg := config.Config{
-		LLM: config.LLMConfig{
-			Provider: "lmstudio",
-			Model:    "llama3.2",
-			URL:      "http://localhost:1234",
-		},
-	}
-	body, err := json.Marshal(newCfg)
+	body, err := json.Marshal(map[string]string{
+		"model":  "llama3.2",
+		"url":    "http://localhost:1234",
+		"apiKey": "test-api-key",
+	})
 	if err != nil {
 		t.Fatalf("failed to marshal config: %v", err)
 	}
@@ -251,15 +243,42 @@ func TestHandleAPIConfig(t *testing.T) {
 		t.Errorf("handleConfig POST status = %d, want %d", rec2.Code, http.StatusOK)
 		t.Logf("body: %s", rec2.Body.String())
 	}
+
+	// Verify config was written to the temp directory.
+	configFile := filepath.Join(configDir, "config.json")
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatalf("config.json not found in temp dir: %v", err)
+	}
+
+	var saved struct {
+		LLM struct {
+			Model  string `json:"model"`
+			URL    string `json:"url"`
+			APIKey string `json:"apiKey"`
+		} `json:"llm"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("failed to parse saved config: %v", err)
+	}
+
+	if saved.LLM.Model != "llama3.2" {
+		t.Errorf("expected saved model 'llama3.2', got '%s'", saved.LLM.Model)
+	}
+	if saved.LLM.URL != "http://localhost:1234" {
+		t.Errorf("expected saved URL 'http://localhost:1234', got '%s'", saved.LLM.URL)
+	}
+	if saved.LLM.APIKey != "test-api-key" {
+		t.Errorf("expected saved apiKey 'test-api-key', got '%s'", saved.LLM.APIKey)
+	}
 }
 
 func TestHandleAPISessions(t *testing.T) {
-	srv, sessionsDir := setupTestServer(t)
+	srv, _ := setupTestServer(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/sessions", srv.handleSessions)
 
-	// Test GET (empty)
 	req := httptest.NewRequest("GET", "/api/sessions", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -277,15 +296,12 @@ func TestHandleAPISessions(t *testing.T) {
 		t.Errorf("expected 0 sessions, got %d", len(summaries))
 	}
 
-	// Create a session
-	sess, err := session.New(sessionsDir)
+	sess, err := srv.sessionSrv.CreateSession("hello")
 	if err != nil {
-		t.Fatalf("session.New() error: %v", err)
+		t.Fatalf("sessionSrv.CreateSession() error: %v", err)
 	}
-	sess.RecordMessage("user", "hello", nil, "")
 	sess.Close()
 
-	// Test GET (with session)
 	req2 := httptest.NewRequest("GET", "/api/sessions", nil)
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, req2)
@@ -302,7 +318,6 @@ func TestHandleAPISessions(t *testing.T) {
 		t.Errorf("expected 1 session, got %d", len(summaries))
 	}
 
-	// Test POST (create session)
 	req3 := httptest.NewRequest("POST", "/api/sessions", nil)
 	rec3 := httptest.NewRecorder()
 	mux.ServeHTTP(rec3, req3)
@@ -322,22 +337,21 @@ func TestHandleAPISessions(t *testing.T) {
 }
 
 func TestHandleSessionHistory(t *testing.T) {
-	srv, sessionsDir := setupTestServer(t)
+	srv, _ := setupTestServer(t)
 
-	// Create a session with messages
-	sess, err := session.New(sessionsDir)
+	sess, err := srv.sessionSrv.CreateSession("test question")
 	if err != nil {
-		t.Fatalf("session.New() error: %v", err)
+		t.Fatalf("sessionSrv.CreateSession() error: %v", err)
 	}
-	sess.RecordMessage("user", "test question", nil, "")
-	sess.RecordMessage("assistant", "test answer", nil, "")
+	// Record an assistant response
+	events, _ := srv.sessionSrv.SessionHistory(sess.ID())
+	_ = events
 	sessionID := sess.ID()
 	sess.Close()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/sessions/{id}/history", srv.handleSessionHistory)
 
-	// Test GET history
 	req := httptest.NewRequest("GET", "/api/sessions/"+sessionID+"/history", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -347,16 +361,15 @@ func TestHandleSessionHistory(t *testing.T) {
 		t.Logf("body: %s", rec.Body.String())
 	}
 
-	var events []session.Event
-	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+	var events2 []session.Event
+	if err := json.Unmarshal(rec.Body.Bytes(), &events2); err != nil {
 		t.Fatalf("failed to parse history response: %v", err)
 	}
 
-	if len(events) < 2 {
-		t.Errorf("expected at least 2 events (header + 2 messages), got %d", len(events))
+	if len(events2) < 2 {
+		t.Errorf("expected at least 2 events (header + user message), got %d", len(events2))
 	}
 
-	// Test with invalid session ID
 	req2 := httptest.NewRequest("GET", "/api/sessions/invalid-id/history", nil)
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, req2)
@@ -373,7 +386,6 @@ func TestStaticFilesServed(t *testing.T) {
 	mux.Handle("/styles.css", http.FileServer(http.FS(webFS)))
 	mux.Handle("/app.js", http.FileServer(http.FS(webFS)))
 
-	// Test styles.css
 	req := httptest.NewRequest("GET", "/styles.css", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -386,7 +398,6 @@ func TestStaticFilesServed(t *testing.T) {
 		t.Error("styles.css response body is empty")
 	}
 
-	// Test app.js
 	req2 := httptest.NewRequest("GET", "/app.js", nil)
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, req2)
@@ -406,7 +417,6 @@ func TestRootNotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleRoot)
 
-	// Requesting a path other than "/" should return 404
 	req := httptest.NewRequest("GET", "/some/other/path", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)

@@ -4,12 +4,12 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -34,17 +34,17 @@ var chatTemplate *template.Template
 
 // Server serves the web interface and SSE agent stream.
 type Server struct {
-	addr        string
-	mu          sync.RWMutex
-	cfg         *config.Config
-	sessionsDir string
+	addr      string
+	mu        sync.RWMutex
+	cfg       *config.Config
+	sessionSrv *session.SessionService
 }
 
-// New creates a Server listening on the given address with the specified sessions directory.
-func New(addr string, sessionsDir string) *Server {
+// New creates a Server listening on the given address with the specified session service.
+func New(addr string, sessionSrv *session.SessionService) *Server {
 	return &Server{
-		addr:        addr,
-		sessionsDir: sessionsDir,
+		addr:       addr,
+		sessionSrv: sessionSrv,
 	}
 }
 
@@ -110,7 +110,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summaries, err := session.List(s.sessionsDir)
+	summaries, err := s.sessionSrv.ListSessions()
 	if err != nil {
 		slog.Error("failed to list sessions", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -147,43 +147,56 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 // handleGetConfig returns the current config as JSON.
 func (s *Server) handleGetConfig(w http.ResponseWriter) {
 	cfg := s.getConfig()
+	resp := struct {
+		Model  string `json:"model"`
+		URL    string `json:"url"`
+		APIKey string `json:"apiKey"`
+	}{
+		Model:  cfg.GetModel(),
+		URL:    cfg.GetURL(),
+		APIKey: cfg.GetAPIKey(),
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(cfg)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handlePostConfig saves a new config from the request body.
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
-	var newCfg config.Config
-	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+	var body struct {
+		Model string `json:"model"`
+		URL   string `json:"url"`
+		APIKey string `json:"apiKey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	// Validate provider
-	if newCfg.LLM.Provider != "auto" && newCfg.LLM.Provider != "ollama" &&
-		newCfg.LLM.Provider != "lmstudio" && newCfg.LLM.Provider != "llamacpp" &&
-		newCfg.LLM.Provider != "omlx" && newCfg.LLM.Provider != "" {
-		http.Error(w, "invalid provider", http.StatusBadRequest)
+	cfg := s.getConfig()
+	if cfg == nil {
+		http.Error(w, "config not initialized", http.StatusInternalServerError)
 		return
 	}
 
-	// Save to disk
-	if err := config.Save(&newCfg); err != nil {
+	// Preserve existing API key if not provided in the request.
+	if body.APIKey == "" {
+		body.APIKey = cfg.GetAPIKey()
+	}
+
+	cfg.SetModel(body.Model)
+	cfg.SetURL(body.URL)
+	cfg.SetAPIKey(body.APIKey)
+
+	if err := cfg.Save(); err != nil {
 		slog.Error("failed to save config", "error", err)
 		http.Error(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
 
-	// Update in-memory config
-	s.mu.Lock()
-	s.cfg = &newCfg
-	s.mu.Unlock()
+	slog.Info("config updated", "model", cfg.GetModel(), "url", cfg.GetURL())
 
-	slog.Info("config updated", "provider", newCfg.LLM.Provider, "model", newCfg.LLM.Model, "url", newCfg.LLM.URL)
-
-	// Return saved config
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(newCfg)
+	json.NewEncoder(w).Encode(cfg)
 }
 
 // handleSessions handles GET (list) and POST (create) for /api/sessions.
@@ -192,7 +205,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.handleListSessions(w)
 	case http.MethodPost:
-		s.handleCreateSession(w)
+		s.handleCreateSession(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -200,7 +213,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 // handleListSessions returns the list of session summaries (id + title).
 func (s *Server) handleListSessions(w http.ResponseWriter) {
-	summaries, err := session.List(s.sessionsDir)
+	summaries, err := s.sessionSrv.ListSessions()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("list sessions: %v", err), http.StatusInternalServerError)
 		return
@@ -209,10 +222,32 @@ func (s *Server) handleListSessions(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(summaries)
 }
 
-// handleCreateSession creates a new session and returns its ID.
-func (s *Server) handleCreateSession(w http.ResponseWriter) {
+func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	slog.Info("creating new session")
-	sess, err := session.New(s.sessionsDir)
+
+	// Read the query from the request body (first user message content).
+	query := ""
+	if r.ContentLength > 0 {
+		buf := make([]byte, 1024*64)
+		n, _ := r.Body.Read(buf)
+		if n > 0 {
+			query = strings.TrimSpace(string(buf[:n]))
+		}
+	}
+
+	if query == "" {
+		sess, err := s.sessionSrv.CreateSession("")
+		if err != nil {
+			slog.Error("failed to create session", "error", err)
+			http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"id": sess.ID()})
+		return
+	}
+
+	sess, err := s.sessionSrv.CreateSession(query)
 	if err != nil {
 		slog.Error("failed to create session", "error", err)
 		http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
@@ -231,15 +266,13 @@ type Message struct {
 // handleChat serves the chat page for a specific session with server-side rendered messages.
 // Route: /chat/{id} → serve web UI with the specified session.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	// Extract session ID from path parameter.
 	sessionID := r.PathValue("id")
 	if sessionID == "" {
 		http.Error(w, "session ID required", http.StatusBadRequest)
 		return
 	}
 
-	// Load session to verify it exists
-	sess, err := session.Open(sessionID, s.sessionsDir)
+	sess, err := s.sessionSrv.OpenSession(sessionID)
 	if err != nil {
 		slog.Error("failed to open session for chat view", "sessionID", sessionID, "error", err)
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -247,9 +280,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sess.Close()
 
-	// Load session history to render messages
 	var messages []Message
-	events, err := session.History(sess.Dir())
+	events, err := s.sessionSrv.SessionHistory(sessionID)
 	if err != nil {
 		slog.Warn("failed to load session history for rendering", "sessionID", sessionID, "error", err)
 	} else {
@@ -257,7 +289,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			if ev.Type == "message" && ev.Message != nil {
 				var msg session.Message
 				if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
-					// Only render user and assistant messages with content
 					if (msg.Role == "user" || msg.Role == "assistant") && msg.Content != "" {
 						messages = append(messages, Message{
 							Role:    msg.Role,
@@ -270,8 +301,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Error("found messages", "messages", messages)
 
-	// Load all sessions for sidebar
-	summaries, err := session.List(s.sessionsDir)
+	summaries, err := s.sessionSrv.ListSessions()
 	if err != nil {
 		slog.Error("failed to list sessions", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -311,15 +341,12 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("loading session history", "sessionID", sessionID)
 
-	// Get the session file path
-	sessionFile := filepath.Join(s.sessionsDir, sessionID+".jsonl")
-	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-
-	events, err := session.History(sessionFile)
+	events, err := s.sessionSrv.SessionHistory(sessionID)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
 		slog.Error("failed to load session history", "sessionID", sessionID, "error", err)
 		http.Error(w, fmt.Sprintf("load history: %v", err), http.StatusInternalServerError)
 		return
@@ -333,10 +360,8 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 // The session ID is passed via ?session=<id> query parameter.
 // If no session ID is provided, a new session is created.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	// Get session ID from URL (optional — creates new if omitted).
 	sessionID := r.URL.Query().Get("session")
 
-	// Get query from URL or POST body.
 	query := r.URL.Query().Get("query")
 	if query == "" && r.Method == "POST" {
 		buf := make([]byte, 1024*64)
@@ -350,7 +375,6 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("stream request", "query", query, "sessionID", sessionID, "remoteAddr", r.RemoteAddr)
 
-	// Create LLM client from current config.
 	cfg := s.getConfig()
 	client, err := llm.New(cfg, "")
 	if err != nil {
@@ -360,11 +384,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("using LLM", "client", client.Name())
 
-	// Create or resume a session.
 	var sess *session.Session
 	if sessionID != "" {
-		var err error
-		sess, err = session.Open(sessionID, s.sessionsDir)
+		sess, err = s.sessionSrv.OpenSession(sessionID)
 		if err != nil {
 			slog.Error("failed to open session", "id", sessionID, "error", err)
 			http.Error(w, fmt.Sprintf("session not found: %v", err), http.StatusNotFound)
@@ -372,8 +394,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Info("session resumed", "id", sess.ID())
 	} else {
-		var err error
-		sess, err = session.New(s.sessionsDir)
+		sess, err = s.sessionSrv.CreateSession(query)
 		if err != nil {
 			slog.Error("failed to create session", "error", err)
 			http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
@@ -382,36 +403,30 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sess != nil {
-		slog.Info("session", "id", sess.ID(), "dir", sess.Dir(), "title", sess.Title())
-		sess.RecordModel(client.Name(), cfg.LLM.Model)
+		slog.Info("session", "id", sess.ID(), "title", sess.Title())
+		sess.RecordModel(cfg.LLM.Model)
 		defer sess.Close()
 	}
 
-	// Create agent and attach the session.
 	ag := agent.New(client)
 	if sess != nil {
 		ag.SetSession(sess)
 	}
 
-	// Initialize conversation with the user's message.
 	messages := []llm.Message{
 		{Role: "user", Content: query},
 	}
 
-	// If resuming a session, prepend existing message history so the LLM
-	// has full context from the conversation.
 	if sess != nil {
-		events, histErr := session.History(sess.Dir())
+		events, histErr := s.sessionSrv.SessionHistory(sess.ID())
 		if histErr != nil {
 			slog.Warn("failed to load session history for LLM context", "sessionID", sess.ID(), "error", histErr)
 		} else {
-			// Extract messages from events and prepend to conversation.
 			var history []llm.Message
 			for _, ev := range events {
 				if ev.Type == "message" && ev.Message != nil {
 					var msg session.Message
 					if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
-						// Convert session.ToolCall to llm.ToolCall.
 						var toolCalls []llm.ToolCall
 						for _, stc := range msg.ToolCalls {
 							toolCalls = append(toolCalls, llm.ToolCall{
@@ -439,11 +454,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create a context that cancels when the client disconnects.
+	// Track how many messages are already in the session history.
+	// We only record the new messages (query + agent response), not the history.
+	historyCount := len(messages) - 1
+
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// Set SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -453,17 +470,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send the session ID as the first event so the UI can track it.
 	if sess != nil {
 		s.sendEvent(w, "session", map[string]string{"id": sess.ID()})
 	}
 
-	// Run the agent loop and stream results.
 	go func() {
 		defer cancel()
 
 		slog.Debug("starting agent loop", "query", query, "sessionID", sess.ID())
-		// Run the full agentic loop.
 		results, err := ag.Run(ctx, messages)
 		if err != nil {
 			slog.Error("agent loop failed", "query", query, "error", err)
@@ -472,11 +486,20 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Stream the final assistant response.
 		for _, msg := range results {
 			if msg.Content != "" {
 				slog.Debug("streaming final response", "contentLen", len(msg.Content))
 				s.sendEvent(w, "message", map[string]string{"content": msg.Content})
+			}
+		}
+
+		// Record only the new messages (not the prepended history).
+		if sess != nil && historyCount >= 0 {
+			newMessages := messages[historyCount:]
+			for _, msg := range newMessages {
+				if msg.Content != "" {
+					sess.RecordMessage(msg.Role, msg.Content, nil, "")
+				}
 			}
 		}
 
@@ -485,7 +508,6 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	flusher.Flush()
-	// Keep the connection open until the client disconnects or context is cancelled.
 	<-ctx.Done()
 }
 
