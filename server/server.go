@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,31 +16,23 @@ import (
 	"github.com/rmyers/majordomo/config"
 	"github.com/rmyers/majordomo/llm"
 	"github.com/rmyers/majordomo/session"
+	"github.com/rmyers/majordomo/templates"
 )
 
-//go:embed templates/*.html styles.css app.js
+//go:embed *
 var webFS embed.FS
-
-//go:embed templates/layout.html templates/index.html
-var homeTemplates embed.FS
-
-//go:embed templates/layout.html templates/chat.html
-var chatTemplates embed.FS
-
-var templates *template.Template
-var indexTemplate *template.Template
-var chatTemplate *template.Template
 
 // Server serves the web interface and SSE agent stream.
 type Server struct {
-	addr      string
-	mu        sync.RWMutex
-	cfg       *config.Config
+	addr       string
+	mu         sync.RWMutex
+	cfg        *config.Config
 	sessionSrv *session.SessionService
 }
 
 // New creates a Server listening on the given address with the specified session service.
 func New(addr string, sessionSrv *session.SessionService) *Server {
+
 	return &Server{
 		addr:       addr,
 		sessionSrv: sessionSrv,
@@ -53,17 +44,6 @@ func (s *Server) Run(cfg *config.Config) error {
 	s.mu.Lock()
 	s.cfg = cfg
 	s.mu.Unlock()
-
-	// Parse templates
-	var err error
-	indexTemplate, err = template.ParseFS(homeTemplates, "templates/*.html")
-	if err != nil {
-		return fmt.Errorf("failed to parse templates: %w", err)
-	}
-	chatTemplate, err = template.ParseFS(chatTemplates, "templates/*.html")
-	if err != nil {
-		return fmt.Errorf("failed to parse templates: %w", err)
-	}
 
 	mux := http.NewServeMux()
 
@@ -117,18 +97,16 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := struct {
-		Sessions  []session.Summary
-		SessionID string
-	}{
+	data := templates.HomeParams{
 		Sessions:  summaries,
 		SessionID: "",
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := indexTemplate.ExecuteTemplate(w, "layout", data); err != nil {
-		slog.Error("failed to render template", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+
+	if err := templates.Home(w, data); err != nil {
+		http.Error(w, "Error rendering home", http.StatusBadRequest)
+		return
 	}
 }
 
@@ -163,8 +141,8 @@ func (s *Server) handleGetConfig(w http.ResponseWriter) {
 // handlePostConfig saves a new config from the request body.
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Model string `json:"model"`
-		URL   string `json:"url"`
+		Model  string `json:"model"`
+		URL    string `json:"url"`
 		APIKey string `json:"apiKey"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -257,12 +235,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"id": sess.ID()})
 }
 
-// Message represents a chat message for template rendering
-type Message struct {
-	Role    string
-	Content string
-}
-
 // handleChat serves the chat page for a specific session with server-side rendered messages.
 // Route: /chat/{id} → serve web UI with the specified session.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -280,26 +252,24 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sess.Close()
 
-	var messages []Message
+	var messages []session.Message
 	events, err := s.sessionSrv.SessionHistory(sessionID)
 	if err != nil {
-		slog.Warn("failed to load session history for rendering", "sessionID", sessionID, "error", err)
-	} else {
-		for _, ev := range events {
-			if ev.Type == "message" && ev.Message != nil {
-				var msg session.Message
-				if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
-					if (msg.Role == "user" || msg.Role == "assistant") && msg.Content != "" {
-						messages = append(messages, Message{
-							Role:    msg.Role,
-							Content: msg.Content,
-						})
-					}
+		slog.Error("failed to list sessions", "error", err)
+		http.Error(w, "Sessions events missing", http.StatusInternalServerError)
+		return
+	}
+
+	for _, ev := range events {
+		if ev.Type == "message" && ev.Message != nil {
+			var msg session.Message
+			if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
+				if (msg.Role == "user" || msg.Role == "assistant") && msg.Content != "" {
+					messages = append(messages, msg)
 				}
 			}
 		}
 	}
-	slog.Error("found messages", "messages", messages)
 
 	summaries, err := s.sessionSrv.ListSessions()
 	if err != nil {
@@ -308,20 +278,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := struct {
-		Sessions  []session.Summary
-		SessionID string
-		Messages  []Message
-	}{
+	data := templates.ChatParams{
 		Sessions:  summaries,
 		SessionID: sessionID,
 		Messages:  messages,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := chatTemplate.ExecuteTemplate(w, "layout", data); err != nil {
-		slog.Error("failed to render chat template", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	if err := templates.Chat(w, data); err != nil {
+		http.Error(w, "Error rendering home", http.StatusBadRequest)
+		return
 	}
 }
 

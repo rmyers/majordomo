@@ -5,16 +5,25 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
+	"github.com/lmittmann/tint"
 	"github.com/rmyers/majordomo/config"
 	"github.com/rmyers/majordomo/server"
 	"github.com/rmyers/majordomo/session"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	})))
+	w := os.Stderr
+
+	// Set global logger with custom options
+	slog.SetDefault(slog.New(
+		tint.NewTextHandler(w, &tint.Options{
+			Level:      slog.LevelDebug,
+			TimeFormat: time.Kitchen,
+			AddSource:  true,
+		}),
+	))
 
 	port := flag.String("port", ":3636", "HTTP listen address (host:port)")
 	configDir := flag.String("config", "", "directory for config.json and sessions (default: ~/.config/majordomo)")

@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"html/template"
-
 	"github.com/rmyers/majordomo/config"
 	"github.com/rmyers/majordomo/session"
 )
@@ -30,54 +28,11 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	svc := session.NewSessionService(cfg)
 	srv := New(":0", svc)
 
-	if templates == nil {
-		var err error
-		templates, err = template.ParseFS(webFS, "templates/*.html")
-		if err != nil {
-			t.Fatalf("failed to parse templates: %v", err)
-		}
-	}
-
-	if indexTemplate == nil {
-		var err error
-		indexTemplate, err = template.ParseFS(homeTemplates, "templates/*.html")
-		if err != nil {
-			t.Fatalf("failed to parse index templates: %v", err)
-		}
-	}
-
-	if chatTemplate == nil {
-		var err error
-		chatTemplate, err = template.ParseFS(chatTemplates, "templates/*.html")
-		if err != nil {
-			t.Fatalf("failed to parse chat templates: %v", err)
-		}
-	}
-
 	srv.mu.Lock()
 	srv.cfg = cfg
 	srv.mu.Unlock()
 
 	return srv, tmpDir
-}
-
-func TestTemplateParsing(t *testing.T) {
-	tmpl, err := template.ParseFS(webFS, "templates/*.html")
-	if err != nil {
-		t.Fatalf("template.ParseFS() error: %v", err)
-	}
-
-	if tmpl.Lookup("index.html") == nil {
-		t.Error("expected 'index.html' template to be parsed")
-	}
-
-	if tmpl.Lookup("chat.html") == nil {
-		t.Error("expected 'chat.html' template to be parsed")
-	}
-
-	if tmpl.Lookup("layout.html") == nil {
-		t.Error("expected 'layout.html' template to be parsed")
-	}
 }
 
 func TestHandleRoot(t *testing.T) {
