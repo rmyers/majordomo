@@ -24,20 +24,22 @@ var webFS embed.FS
 
 // Server serves the web interface and SSE agent stream.
 type Server struct {
-	mu         sync.RWMutex
-	cfg        *config.Config
-	sessionSrv *session.SessionService
-	agent      *agent.Agent
-	mux        *http.ServeMux
+	mu          sync.RWMutex
+	cfg         *config.Config
+	sessionSrv  *session.SessionService
+	agent       *agent.Agent
+	llmManager  *llm.Manager
+	mux         *http.ServeMux
 }
 
 // New creates a Server listening on the given address with the specified session service.
-func New(config *config.Config, sessionSrv *session.SessionService, agent *agent.Agent) *Server {
+func New(config *config.Config, sessionSrv *session.SessionService, agent *agent.Agent, llmManager *llm.Manager) *Server {
 	mux := http.NewServeMux()
 	server := &Server{
 		cfg:        config,
 		sessionSrv: sessionSrv,
 		agent:      agent,
+		llmManager: llmManager,
 		mux:        mux,
 	}
 	server.loadRouter()
@@ -60,9 +62,9 @@ func (s *Server) loadRouter() {
 	s.mux.Handle("/styles.css", http.FileServer(http.FS(webFS)))
 	s.mux.Handle("/app.js", http.FileServer(http.FS(webFS)))
 
-	// Config API endpoints.
-	s.mux.HandleFunc("GET /api/config", s.handleGetConfig)
-	s.mux.HandleFunc("POST /api/config", s.handlePostConfig)
+	// Settings page.
+	s.mux.HandleFunc("GET /settings", s.handleGetSettings)
+	s.mux.HandleFunc("POST /settings", s.handlePostSettings)
 
 	// Session endpoints
 	s.mux.HandleFunc("GET /api/sessions", s.handleListSessions)
@@ -118,59 +120,124 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleGetConfig returns the current config as JSON.
-func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+// handleGetSettings renders the settings page with current config values.
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	cfg := s.getConfig()
-	resp := struct {
-		Model  string `json:"model"`
-		URL    string `json:"url"`
-		APIKey string `json:"apiKey"`
-	}{
-		Model:  cfg.GetModel(),
-		URL:    cfg.GetURL(),
-		APIKey: cfg.GetAPIKey(),
+
+	summaries, err := s.sessionSrv.ListSessions()
+	if err != nil {
+		slog.Error("failed to list sessions", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+
+	data := templates.SettingsParams{
+		Sessions:  summaries,
+		SessionID: "",
+		Provider:  cfg.GetProvider(),
+		Model:     cfg.GetModel(),
+		URL:       cfg.GetURL(),
+		APIKey:    "",
+		Host:      cfg.GetHost(),
+		Port:      cfg.GetPort(),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.Settings(w, data); err != nil {
+		http.Error(w, "Error rendering settings", http.StatusInternalServerError)
+		return
+	}
 }
 
-// handlePostConfig saves a new config from the request body.
-func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Model  string `json:"model"`
-		URL    string `json:"url"`
-		APIKey string `json:"apiKey"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+// handlePostSettings saves config from form data and refreshes the LLM client.
+func (s *Server) handlePostSettings(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		slog.Error("failed to parse form", "error", err)
+		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
+	}
+
+	provider := strings.TrimSpace(r.Form.Get("provider"))
+	model := strings.TrimSpace(r.Form.Get("model"))
+	url := strings.TrimSpace(r.Form.Get("url"))
+	apiKey := r.Form.Get("apiKey")
+	host := strings.TrimSpace(r.Form.Get("host"))
+	port := strings.TrimSpace(r.Form.Get("port"))
+
+	if url == "" {
+		s.renderSettingsPage(w, r, "", provider, model, url, apiKey, host, port, "URL is required")
+		return
+	}
+
+	if port != "" {
+		if _, err := fmt.Sscanf(port, "%d", new(int)); err != nil {
+			s.renderSettingsPage(w, r, "", provider, model, url, apiKey, host, port, "Port must be a valid number")
+			return
+		}
 	}
 
 	cfg := s.getConfig()
 	if cfg == nil {
-		http.Error(w, "config not initialized", http.StatusInternalServerError)
+		s.renderSettingsPage(w, r, "", provider, model, url, apiKey, host, port, "config not initialized")
 		return
 	}
 
-	// Preserve existing API key if not provided in the request.
-	if body.APIKey == "" {
-		body.APIKey = cfg.GetAPIKey()
+	// Preserve existing API key if empty.
+	if apiKey == "" {
+		apiKey = cfg.GetAPIKey()
 	}
 
-	cfg.SetModel(body.Model)
-	cfg.SetURL(body.URL)
-	cfg.SetAPIKey(body.APIKey)
+	cfg.SetProvider(provider)
+	cfg.SetModel(model)
+	cfg.SetURL(url)
+	cfg.SetAPIKey(apiKey)
+	cfg.SetHost(host)
+	cfg.SetPort(port)
 
 	if err := cfg.Save(); err != nil {
 		slog.Error("failed to save config", "error", err)
-		http.Error(w, "failed to save config", http.StatusInternalServerError)
+		s.renderSettingsPage(w, r, "", provider, model, url, apiKey, host, port, fmt.Sprintf("failed to save config: %v", err))
 		return
 	}
 
-	slog.Info("config updated", "model", cfg.GetModel(), "url", cfg.GetURL())
+	// Refresh the LLM client with new configuration.
+	if err := s.llmManager.Refresh(cfg, ""); err != nil {
+		slog.Error("failed to refresh LLM client", "error", err)
+		s.renderSettingsPage(w, r, "", provider, model, url, apiKey, host, port, fmt.Sprintf("config saved but LLM refresh failed: %v", err))
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(cfg)
+	slog.Info("config updated and LLM refreshed", "provider", cfg.GetProvider(), "model", cfg.GetModel(), "url", cfg.GetURL())
+
+	s.renderSettingsPage(w, r, "Configuration saved and LLM refreshed!", provider, model, url, apiKey, host, port, "")
+}
+
+func (s *Server) renderSettingsPage(w http.ResponseWriter, r *http.Request, success, provider, model, url, apiKey, host, port, errMsg string) {
+	summaries, err := s.sessionSrv.ListSessions()
+	if err != nil {
+		slog.Error("failed to list sessions", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	data := templates.SettingsParams{
+		Sessions:  summaries,
+		SessionID: "",
+		Provider:  provider,
+		Model:     model,
+		URL:       url,
+		APIKey:    "",
+		Host:      host,
+		Port:      port,
+		Success:   success,
+		Error:     errMsg,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := templates.Settings(w, data); err != nil {
+		http.Error(w, "Error rendering settings", http.StatusInternalServerError)
+		return
+	}
 }
 
 // handleListSessions returns the list of session summaries (id + title).

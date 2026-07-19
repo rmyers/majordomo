@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,7 +30,7 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	llmManager.SetInitial(cfg, "")
 	agent := agent.New(llmManager)
 	svc := session.NewSessionService(cfg)
-	srv := New(cfg, svc, agent)
+	srv := New(cfg, svc, agent, llmManager)
 
 	return srv, tmpDir
 }
@@ -142,50 +141,55 @@ func TestHandleChatNonExistentSession(t *testing.T) {
 	}
 }
 
-func TestHandleAPIConfig(t *testing.T) {
+func TestHandleSettings(t *testing.T) {
 	srv, configDir := setupTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/config", nil)
+	req := httptest.NewRequest("GET", "/settings", nil)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Errorf("handleConfig GET status = %d, want %d", rec.Code, http.StatusOK)
+		t.Errorf("handleSettings GET status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var resp struct {
-		Model  string `json:"model"`
-		URL    string `json:"url"`
-		APIKey string `json:"apiKey"`
+	body := rec.Body.String()
+	if !strings.Contains(body, "LLM Configuration") {
+		t.Errorf("handleSettings GET body missing 'LLM Configuration': %s", body)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to parse config response: %v", err)
+	if !strings.Contains(body, `name="provider"`) {
+		t.Error("handleSettings GET missing provider field")
+	}
+	if !strings.Contains(body, `name="model"`) {
+		t.Error("handleSettings GET missing model field")
+	}
+	if !strings.Contains(body, `name="url"`) {
+		t.Error("handleSettings GET missing url field")
+	}
+	if !strings.Contains(body, `name="apiKey"`) {
+		t.Error("handleSettings GET missing apiKey field")
+	}
+	if !strings.Contains(body, `name="host"`) {
+		t.Error("handleSettings GET missing host field")
+	}
+	if !strings.Contains(body, `name="port"`) {
+		t.Error("handleSettings GET missing port field")
 	}
 
-	if resp.Model != "test-model" {
-		t.Errorf("expected model 'test-model', got '%s'", resp.Model)
-	}
-
-	body, err := json.Marshal(map[string]string{
-		"model":  "llama3.2",
-		"url":    "http://localhost:1234",
-		"apiKey": "test-api-key",
-	})
-	if err != nil {
-		t.Fatalf("failed to marshal config: %v", err)
-	}
-
-	req2 := httptest.NewRequest("POST", "/api/config", io.NopCloser(strings.NewReader(string(body))))
-	req2.Header.Set("Content-Type", "application/json")
+	formData := "provider=local&model=llama3.2&url=http://localhost:11434&apiKey=&host=localhost&port=3636"
+	req2 := httptest.NewRequest("POST", "/settings", strings.NewReader(formData))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec2 := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusOK {
-		t.Errorf("handleConfig POST status = %d, want %d", rec2.Code, http.StatusOK)
+		t.Errorf("handleSettings POST status = %d, want %d", rec2.Code, http.StatusOK)
 		t.Logf("body: %s", rec2.Body.String())
 	}
 
-	// Verify config was written to the temp directory.
+	if !strings.Contains(rec2.Body.String(), "Configuration saved") {
+		t.Errorf("handleSettings POST missing success message: %s", rec2.Body.String())
+	}
+
 	configFile := filepath.Join(configDir, "config.json")
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -194,23 +198,72 @@ func TestHandleAPIConfig(t *testing.T) {
 
 	var saved struct {
 		LLM struct {
-			Model  string `json:"model"`
-			URL    string `json:"url"`
-			APIKey string `json:"apiKey"`
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			URL      string `json:"url"`
+			APIKey   string `json:"apiKey,omitempty"`
 		} `json:"llm"`
+		Server struct {
+			Host string `json:"host"`
+			Port string `json:"port"`
+		} `json:"server"`
 	}
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatalf("failed to parse saved config: %v", err)
 	}
 
+	if saved.LLM.Provider != "local" {
+		t.Errorf("expected saved provider 'local', got '%s'", saved.LLM.Provider)
+	}
 	if saved.LLM.Model != "llama3.2" {
 		t.Errorf("expected saved model 'llama3.2', got '%s'", saved.LLM.Model)
 	}
-	if saved.LLM.URL != "http://localhost:1234" {
-		t.Errorf("expected saved URL 'http://localhost:1234', got '%s'", saved.LLM.URL)
+	if saved.LLM.URL != "http://localhost:11434" {
+		t.Errorf("expected saved URL 'http://localhost:11434', got '%s'", saved.LLM.URL)
 	}
-	if saved.LLM.APIKey != "test-api-key" {
-		t.Errorf("expected saved apiKey 'test-api-key', got '%s'", saved.LLM.APIKey)
+	if saved.Server.Host != "localhost" {
+		t.Errorf("expected saved host 'localhost', got '%s'", saved.Server.Host)
+	}
+	if saved.Server.Port != "3636" {
+		t.Errorf("expected saved port '3636', got '%s'", saved.Server.Port)
+	}
+}
+
+func TestHandleSettingsInvalidPort(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	formData := "provider=local&model=llama3.2&url=http://localhost:11434&apiKey=&host=localhost&port=abc"
+	req := httptest.NewRequest("POST", "/settings", strings.NewReader(formData))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("handleSettings POST with invalid port status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "Port must be a valid number") {
+		t.Errorf("handleSettings POST with invalid port missing error message: %s", body)
+	}
+}
+
+func TestHandleSettingsEmptyURL(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	formData := "provider=local&model=llama3.2&url=&apiKey=&host=localhost&port=3636"
+	req := httptest.NewRequest("POST", "/settings", strings.NewReader(formData))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("handleSettings POST with empty URL status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "URL is required") {
+		t.Errorf("handleSettings POST with empty URL missing error message: %s", body)
 	}
 }
 

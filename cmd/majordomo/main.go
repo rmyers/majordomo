@@ -44,7 +44,7 @@ func main() {
 	agent := agent.New(llmManager)
 
 	sessionService := session.NewSessionService(cfg)
-	srv := server.New(cfg, sessionService, agent)
+	srv := server.New(cfg, sessionService, agent, llmManager)
 	if err := srv.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
