@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/lmittmann/tint"
+	"github.com/rmyers/majordomo/agent"
 	"github.com/rmyers/majordomo/config"
+	"github.com/rmyers/majordomo/llm"
 	"github.com/rmyers/majordomo/server"
 	"github.com/rmyers/majordomo/session"
 )
@@ -25,19 +27,25 @@ func main() {
 		}),
 	))
 
-	port := flag.String("port", ":3636", "HTTP listen address (host:port)")
 	configDir := flag.String("config", "", "directory for config.json and sessions (default: ~/.config/majordomo)")
 	flag.Parse()
 
 	cfg := config.New(*configDir)
-	if err := cfg.Load(); err != nil {
-		slog.Warn("using default config", "error", err)
-	}
 	slog.Info("Using config", "model", cfg.GetModel(), "url", cfg.GetURL())
 
+	// Configure the llm Manager
+	llmManager := llm.NewManager()
+	if err := llmManager.SetInitial(cfg, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Configure the agent
+	agent := agent.New(llmManager)
+
 	sessionService := session.NewSessionService(cfg)
-	srv := server.New(*port, sessionService)
-	if err := srv.Run(cfg); err != nil {
+	srv := server.New(cfg, sessionService, agent)
+	if err := srv.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
 	}

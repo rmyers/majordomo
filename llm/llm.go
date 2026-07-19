@@ -10,8 +10,49 @@ import (
 	"net/http"
 	"time"
 
+	"sync/atomic"
+
 	"github.com/rmyers/majordomo/config"
 )
+
+// Manager holds the current client and supports runtime swapping
+type Manager struct {
+	client atomic.Pointer[Client]
+}
+
+func NewManager() *Manager {
+	return &Manager{}
+}
+
+// Get returns the current client. Panics if not initialized.
+func (m *Manager) Get() Client {
+	c := m.client.Load()
+	if c == nil {
+		panic("LLM Manager not initialized. Call SetInitial or Refresh first.")
+	}
+	return *c
+}
+
+// SetInitial creates the first client (call from main)
+func (m *Manager) SetInitial(cfg *config.Config, modelOverride string) error {
+	return m.Refresh(cfg, modelOverride)
+}
+
+// Refresh validates, creates, and atomically swaps the client
+func (m *Manager) Refresh(cfg *config.Config, modelOverride string) error {
+	newClient, err := New(cfg, modelOverride)
+	if err != nil {
+		return fmt.Errorf("failed to validate/create LLM client: %w", err)
+	}
+
+	// Atomically swap. If old client exists, close it to free connections.
+	if old := m.client.Swap(&newClient); old != nil {
+		if closer, ok := (*old).(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}
+	return nil
+}
 
 // Message represents a single message in a conversation.
 type Message struct {
@@ -60,6 +101,8 @@ type Client interface {
 	StreamChat(ctx context.Context, messages []Message, handler func(text string, toolCalls []ToolCall)) error
 	// Name returns a human-readable identifier for this client.
 	Name() string
+	// Close the connection
+	Close() error
 }
 
 // Remote talks to any OpenAI-compatible API.
@@ -256,6 +299,12 @@ func (r *Remote) StreamChat(ctx context.Context, messages []Message, handler fun
 	return nil
 }
 
+func (r *Remote) Close() error {
+	// Best practice: close idle connections instead of destroying the client
+	r.client.CloseIdleConnections()
+	return nil
+}
+
 // New creates an LLM client based on config.
 func New(cfg *config.Config, modelOverride string) (Client, error) {
 	model := cfg.LLM.Model
@@ -268,9 +317,9 @@ func New(cfg *config.Config, modelOverride string) (Client, error) {
 	}
 
 	return &Remote{
-		client:   &http.Client{Timeout: 5 * time.Minute},
-		baseURL:  cfg.LLM.URL,
-		model:    model,
-		apiKey:   cfg.LLM.APIKey,
+		client:  &http.Client{Timeout: 5 * time.Minute},
+		baseURL: cfg.LLM.URL,
+		model:   model,
+		apiKey:  cfg.LLM.APIKey,
 	}, nil
 }
