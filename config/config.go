@@ -2,21 +2,30 @@ package config
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
 
 // Config holds the application configuration and manages its own persistence.
 type Config struct {
-	dir     string
-	LLM     LLMConfig `json:"llm"`
+	dir    string
+	Server ServerConfig `json:"server"`
+	LLM    LLMConfig    `json:"llm"`
 }
 
 // LLMConfig holds settings for the local LLM server.
 type LLMConfig struct {
-	Model  string `json:"model"`
-	URL    string `json:"url"`
-	APIKey string `json:"apiKey,omitempty"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	URL      string `json:"url"`
+	APIKey   string `json:"apiKey,omitempty"`
+}
+
+// ServerConfig holds settings for the api server.
+type ServerConfig struct {
+	Host string `json:"host"`
+	Port string `json:"port"`
 }
 
 // New creates a Config that reads/writes to the given directory.
@@ -25,7 +34,8 @@ func New(dir string) *Config {
 	if dir == "" {
 		dir = defaultDir()
 	}
-	return &Config{dir: dir}
+	config := loadConfig(dir)
+	return &config
 }
 
 // Default returns a Config with no settings, using the default directory.
@@ -40,7 +50,7 @@ func (c *Config) Dir() string {
 
 // Path returns the full path to the config file.
 func (c *Config) Path() string {
-	return filepath.Join(c.dir, "config.json")
+	return configFile(c.dir)
 }
 
 // Load reads the config file from disk and merges it on top of defaults.
@@ -107,4 +117,30 @@ func defaultDir() string {
 		dir = "."
 	}
 	return filepath.Join(dir, "majordomo")
+}
+
+// configFile returns the path to the config file in the config directory
+func configFile(dir string) string {
+	return filepath.Join(dir, "config.json")
+}
+
+// load reads the config file from disk and merges it on top of defaults.
+func loadConfig(dir string) Config {
+	defaults := Config{
+		dir:    dir,
+		Server: ServerConfig{Host: "localhost", Port: "3636"},
+		LLM:    LLMConfig{Provider: "local", URL: "http://localhost:11434", Model: "llama3.2"},
+	}
+	data, err := os.ReadFile(configFile(dir))
+	if err != nil {
+		slog.Warn("Error reading config file", slog.Any("error", err))
+		return defaults
+	}
+
+	// Read in the data and replace the defaults
+	if err := json.Unmarshal(data, &defaults); err != nil {
+		slog.Warn("JSON parse error", slog.Any("error", err))
+		return defaults
+	}
+	return defaults
 }

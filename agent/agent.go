@@ -22,7 +22,7 @@ type ToolResult struct {
 
 // Agent runs the agentic loop: send messages to LLM, execute tool calls, repeat.
 type Agent struct {
-	Client  llm.Client
+	Manager *llm.Manager
 	Tools   []llm.Tool
 	session *session.Session
 }
@@ -33,9 +33,9 @@ func (a *Agent) SetSession(s *session.Session) {
 }
 
 // New creates an Agent with the standard tools (read, edit, write, bash).
-func New(client llm.Client) *Agent {
+func New(manager *llm.Manager) *Agent {
 	return &Agent{
-		Client: client,
+		Manager: manager,
 		Tools: []llm.Tool{
 			{
 				Name:        "read",
@@ -79,10 +79,6 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 	var allMessages []llm.Message
 	for _, m := range messages {
 		allMessages = append(allMessages, m)
-		// Record the initial user message in the session.
-		if a.session != nil && m.Role == "user" {
-			a.session.RecordMessage("user", m.Content, nil, "")
-		}
 	}
 
 	iteration := 0
@@ -90,7 +86,8 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 		iteration++
 		slog.Debug("agent loop iteration", "iteration", iteration, "messageCount", len(allMessages))
 
-		resp, err := a.Client.Chat(ctx, allMessages)
+		client := a.Manager.Get()
+		resp, err := client.Chat(ctx, allMessages)
 		if err != nil {
 			slog.Error("LLM call failed", "iteration", iteration, "error", err)
 			return nil, fmt.Errorf("LLM call: %w", err)

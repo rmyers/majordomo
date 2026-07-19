@@ -24,56 +24,64 @@ var webFS embed.FS
 
 // Server serves the web interface and SSE agent stream.
 type Server struct {
-	addr       string
 	mu         sync.RWMutex
 	cfg        *config.Config
 	sessionSrv *session.SessionService
+	agent      *agent.Agent
+	mux        *http.ServeMux
 }
 
 // New creates a Server listening on the given address with the specified session service.
-func New(addr string, sessionSrv *session.SessionService) *Server {
-
-	return &Server{
-		addr:       addr,
+func New(config *config.Config, sessionSrv *session.SessionService, agent *agent.Agent) *Server {
+	mux := http.NewServeMux()
+	server := &Server{
+		cfg:        config,
 		sessionSrv: sessionSrv,
+		agent:      agent,
+		mux:        mux,
 	}
+	server.loadRouter()
+
+	return server
+}
+
+func (s *Server) addr() string {
+	return fmt.Sprintf("%s:%s", s.cfg.Server.Host, s.cfg.Server.Port)
 }
 
 // Run starts the HTTP server.
-func (s *Server) Run(cfg *config.Config) error {
-	s.mu.Lock()
-	s.cfg = cfg
-	s.mu.Unlock()
+func (s *Server) Run() error {
+	slog.Info("server starting", "addr", s.addr())
+	return http.ListenAndServe(s.addr(), s.mux)
+}
 
-	mux := http.NewServeMux()
-
+func (s *Server) loadRouter() {
 	// Serve static assets
-	mux.Handle("/styles.css", http.FileServer(http.FS(webFS)))
-	mux.Handle("/app.js", http.FileServer(http.FS(webFS)))
+	s.mux.Handle("/styles.css", http.FileServer(http.FS(webFS)))
+	s.mux.Handle("/app.js", http.FileServer(http.FS(webFS)))
 
 	// Config API endpoints.
-	mux.HandleFunc("/api/config", s.handleConfig)
+	s.mux.HandleFunc("GET /api/config", s.handleGetConfig)
+	s.mux.HandleFunc("POST /api/config", s.handlePostConfig)
 
-	// Session list endpoint (GET returns summaries, POST creates a new session).
-	mux.HandleFunc("/api/sessions", s.handleSessions)
+	// Session endpoints
+	s.mux.HandleFunc("GET /api/sessions", s.handleListSessions)
+	s.mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
 
 	// Session history endpoint: GET /api/sessions/{id}/history.
-	mux.HandleFunc("/api/sessions/{id}/history", s.handleSessionHistory)
+	s.mux.HandleFunc("GET /api/sessions/{id}/history", s.handleSessionHistory)
 
 	// Chat page: serves the web UI with a specific session.
 	// Route: /chat/{id} → serve web UI with the specified session.
-	mux.HandleFunc("/chat/{id}", s.handleChat)
+	s.mux.HandleFunc("/chat/{id}", s.handleChat)
 
 	// SSE agent stream endpoint.
-	mux.HandleFunc("/api/stream", func(w http.ResponseWriter, r *http.Request) {
+	s.mux.HandleFunc("/api/stream", func(w http.ResponseWriter, r *http.Request) {
 		s.handleStream(w, r)
 	})
 
 	// Serve the web UI from the embedded filesystem.
-	mux.HandleFunc("/", s.handleRoot)
-
-	slog.Info("server starting", "addr", s.addr)
-	return http.ListenAndServe(s.addr, mux)
+	s.mux.HandleFunc("/", s.handleRoot)
 }
 
 // getConfig returns the current config (read lock).
@@ -110,20 +118,8 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleConfig handles GET/POST for /api/config.
-func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.handleGetConfig(w)
-	case http.MethodPost:
-		s.handlePostConfig(w, r)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
 // handleGetConfig returns the current config as JSON.
-func (s *Server) handleGetConfig(w http.ResponseWriter) {
+func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.getConfig()
 	resp := struct {
 		Model  string `json:"model"`
@@ -177,20 +173,8 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(cfg)
 }
 
-// handleSessions handles GET (list) and POST (create) for /api/sessions.
-func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.handleListSessions(w)
-	case http.MethodPost:
-		s.handleCreateSession(w, r)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
 // handleListSessions returns the list of session summaries (id + title).
-func (s *Server) handleListSessions(w http.ResponseWriter) {
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	summaries, err := s.sessionSrv.ListSessions()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("list sessions: %v", err), http.StatusInternalServerError)
@@ -341,43 +325,15 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("stream request", "query", query, "sessionID", sessionID, "remoteAddr", r.RemoteAddr)
 
-	cfg := s.getConfig()
-	client, err := llm.New(cfg, "")
+	sess, err := s.sessionSrv.OpenSession(sessionID)
 	if err != nil {
-		slog.Error("no LLM available", "error", err)
-		http.Error(w, fmt.Sprintf("no LLM available: %v", err), http.StatusServiceUnavailable)
+		slog.Error("failed to open session", "id", sessionID, "error", err)
+		http.Error(w, fmt.Sprintf("session not found: %v", err), http.StatusNotFound)
 		return
 	}
-	slog.Info("using LLM", "client", client.Name())
+	slog.Info("session resumed", "id", sess.ID())
 
-	var sess *session.Session
-	if sessionID != "" {
-		sess, err = s.sessionSrv.OpenSession(sessionID)
-		if err != nil {
-			slog.Error("failed to open session", "id", sessionID, "error", err)
-			http.Error(w, fmt.Sprintf("session not found: %v", err), http.StatusNotFound)
-			return
-		}
-		slog.Info("session resumed", "id", sess.ID())
-	} else {
-		sess, err = s.sessionSrv.CreateSession(query)
-		if err != nil {
-			slog.Error("failed to create session", "error", err)
-			http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	if sess != nil {
-		slog.Info("session", "id", sess.ID(), "title", sess.Title())
-		sess.RecordModel(cfg.LLM.Model)
-		defer sess.Close()
-	}
-
-	ag := agent.New(client)
-	if sess != nil {
-		ag.SetSession(sess)
-	}
+	s.agent.SetSession(sess)
 
 	messages := []llm.Message{
 		{Role: "user", Content: query},
@@ -444,7 +400,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 
 		slog.Debug("starting agent loop", "query", query, "sessionID", sess.ID())
-		results, err := ag.Run(ctx, messages)
+		results, err := s.agent.Run(ctx, messages)
 		if err != nil {
 			slog.Error("agent loop failed", "query", query, "error", err)
 			s.sendEvent(w, "error", map[string]string{"message": err.Error()})

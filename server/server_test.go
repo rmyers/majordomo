@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rmyers/majordomo/agent"
 	"github.com/rmyers/majordomo/config"
+	"github.com/rmyers/majordomo/llm"
 	"github.com/rmyers/majordomo/session"
 )
 
@@ -25,12 +27,11 @@ func setupTestServer(t *testing.T) (*Server, string) {
 	cfg.SetModel("test-model")
 	cfg.SetURL("http://localhost:11434")
 
+	llmManager := llm.NewManager()
+	llmManager.SetInitial(cfg, "")
+	agent := agent.New(llmManager)
 	svc := session.NewSessionService(cfg)
-	srv := New(":0", svc)
-
-	srv.mu.Lock()
-	srv.cfg = cfg
-	srv.mu.Unlock()
+	srv := New(cfg, svc, agent)
 
 	return srv, tmpDir
 }
@@ -38,12 +39,9 @@ func setupTestServer(t *testing.T) (*Server, string) {
 func TestHandleRoot(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.handleRoot)
-
 	req := httptest.NewRequest("GET", "/", nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("handleRoot() status = %d, want %d", rec.Code, http.StatusOK)
@@ -73,12 +71,9 @@ func TestHandleChat(t *testing.T) {
 	sessionID := sess.ID()
 	sess.Close()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/chat/{id}", srv.handleChat)
-
 	req := httptest.NewRequest("GET", "/chat/"+sessionID, nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("handleChat() status = %d, want %d", rec.Code, http.StatusOK)
@@ -96,7 +91,7 @@ func TestHandleChat(t *testing.T) {
 
 	req2 := httptest.NewRequest("GET", "/chat/invalid-session-id", nil)
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, req2)
+	srv.mux.ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusNotFound {
 		t.Errorf("handleChat() with invalid ID status = %d, want %d", rec2.Code, http.StatusNotFound)
@@ -104,7 +99,7 @@ func TestHandleChat(t *testing.T) {
 
 	req3 := httptest.NewRequest("GET", "/chat/", nil)
 	rec3 := httptest.NewRecorder()
-	mux.ServeHTTP(rec3, req3)
+	srv.mux.ServeHTTP(rec3, req3)
 
 	if rec3.Code != http.StatusNotFound {
 		t.Errorf("handleChat() with empty ID status = %d, want %d (404 from root handler)", rec3.Code, http.StatusNotFound)
@@ -121,12 +116,9 @@ func TestHandleChatWithMessages(t *testing.T) {
 	sessionID := sess.ID()
 	sess.Close()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/chat/{id}", srv.handleChat)
-
 	req := httptest.NewRequest("GET", "/chat/"+sessionID, nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("handleChat() status = %d, want %d", rec.Code, http.StatusOK)
@@ -141,12 +133,9 @@ func TestHandleChatWithMessages(t *testing.T) {
 func TestHandleChatNonExistentSession(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/chat/{id}", srv.handleChat)
-
 	req := httptest.NewRequest("GET", "/chat/nonexistent-session-id", nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("handleChat() with non-existent session status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -156,12 +145,9 @@ func TestHandleChatNonExistentSession(t *testing.T) {
 func TestHandleAPIConfig(t *testing.T) {
 	srv, configDir := setupTestServer(t)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/config", srv.handleConfig)
-
 	req := httptest.NewRequest("GET", "/api/config", nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("handleConfig GET status = %d, want %d", rec.Code, http.StatusOK)
@@ -192,7 +178,7 @@ func TestHandleAPIConfig(t *testing.T) {
 	req2 := httptest.NewRequest("POST", "/api/config", io.NopCloser(strings.NewReader(string(body))))
 	req2.Header.Set("Content-Type", "application/json")
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, req2)
+	srv.mux.ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusOK {
 		t.Errorf("handleConfig POST status = %d, want %d", rec2.Code, http.StatusOK)
@@ -231,12 +217,9 @@ func TestHandleAPIConfig(t *testing.T) {
 func TestHandleAPISessions(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/sessions", srv.handleSessions)
-
 	req := httptest.NewRequest("GET", "/api/sessions", nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("handleSessions GET status = %d, want %d", rec.Code, http.StatusOK)
@@ -259,7 +242,7 @@ func TestHandleAPISessions(t *testing.T) {
 
 	req2 := httptest.NewRequest("GET", "/api/sessions", nil)
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, req2)
+	srv.mux.ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusOK {
 		t.Errorf("handleSessions GET status = %d, want %d", rec2.Code, http.StatusOK)
@@ -275,7 +258,7 @@ func TestHandleAPISessions(t *testing.T) {
 
 	req3 := httptest.NewRequest("POST", "/api/sessions", nil)
 	rec3 := httptest.NewRecorder()
-	mux.ServeHTTP(rec3, req3)
+	srv.mux.ServeHTTP(rec3, req3)
 
 	if rec3.Code != http.StatusOK {
 		t.Errorf("handleSessions POST status = %d, want %d", rec3.Code, http.StatusOK)
@@ -304,12 +287,9 @@ func TestHandleSessionHistory(t *testing.T) {
 	sessionID := sess.ID()
 	sess.Close()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/sessions/{id}/history", srv.handleSessionHistory)
-
 	req := httptest.NewRequest("GET", "/api/sessions/"+sessionID+"/history", nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("handleSessionHistory status = %d, want %d", rec.Code, http.StatusOK)
@@ -327,7 +307,7 @@ func TestHandleSessionHistory(t *testing.T) {
 
 	req2 := httptest.NewRequest("GET", "/api/sessions/invalid-id/history", nil)
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, req2)
+	srv.mux.ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusNotFound {
 		t.Errorf("handleSessionHistory with invalid ID status = %d, want %d", rec2.Code, http.StatusNotFound)
@@ -335,15 +315,11 @@ func TestHandleSessionHistory(t *testing.T) {
 }
 
 func TestStaticFilesServed(t *testing.T) {
-	_, _ = setupTestServer(t)
-
-	mux := http.NewServeMux()
-	mux.Handle("/styles.css", http.FileServer(http.FS(webFS)))
-	mux.Handle("/app.js", http.FileServer(http.FS(webFS)))
+	srv, _ := setupTestServer(t)
 
 	req := httptest.NewRequest("GET", "/styles.css", nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("styles.css status = %d, want %d", rec.Code, http.StatusOK)
@@ -355,7 +331,7 @@ func TestStaticFilesServed(t *testing.T) {
 
 	req2 := httptest.NewRequest("GET", "/app.js", nil)
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, req2)
+	srv.mux.ServeHTTP(rec2, req2)
 
 	if rec2.Code != http.StatusOK {
 		t.Errorf("app.js status = %d, want %d", rec2.Code, http.StatusOK)
@@ -369,12 +345,9 @@ func TestStaticFilesServed(t *testing.T) {
 func TestRootNotFound(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.handleRoot)
-
 	req := httptest.NewRequest("GET", "/some/other/path", nil)
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
+	srv.mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("handleRoot() with non-root path status = %d, want %d", rec.Code, http.StatusNotFound)
