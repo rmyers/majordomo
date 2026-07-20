@@ -1,4 +1,3 @@
-// Chat functionality - only initialize if we're on a chat page
 const chatView = document.getElementById('chat-view');
 const indexView = document.getElementById('index-view');
 
@@ -11,30 +10,25 @@ if (chatView) {
 function initializeIndexView() {
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send-btn');
-
   inputEl.addEventListener('input', () => {
     inputEl.style.height = 'auto';
     inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
   });
-
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       startNewSession();
     }
   });
-
   sendBtn.addEventListener('click', startNewSession);
 
   function startNewSession() {
     const query = inputEl.value.trim();
     if (!query) return;
-
-    // Create new session and redirect to chat with the query
     fetch('/api/sessions', { method: 'POST' })
       .then(res => res.json())
       .then(data => {
-        window.location.href = `/chat/${data.id}?query=${encodeURIComponent(query)}`;
+        window.location.href = `/chat/${data.id}`;
       })
       .catch(err => {
         alert(`Failed to create session: ${err.message}`);
@@ -48,35 +42,20 @@ function initializeChatView() {
   const sendBtn = document.getElementById('send-btn');
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
-
   const sessionId = window.currentSessionId;
   let turn = 0;
 
-  // Auto-resize textarea
   inputEl.addEventListener('input', () => {
     inputEl.style.height = 'auto';
     inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
   });
-
-  // Send on Enter (Shift+Enter for newline)
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
   });
-
   sendBtn.addEventListener('click', sendMessage);
-
-  // Check if there's a query parameter (from new session)
-  const urlParams = new URLSearchParams(window.location.search);
-  const initialQuery = urlParams.get('query');
-  if (initialQuery) {
-    inputEl.value = initialQuery;
-    // Clear the query parameter from URL
-    window.history.replaceState({}, '', window.location.pathname);
-    sendMessage();
-  }
 
   function setStatus(state, text) {
     statusDot.className = state;
@@ -86,39 +65,29 @@ function initializeChatView() {
   function sendMessage() {
     const query = inputEl.value.trim();
     if (!query) return;
-
     const thisTurn = turn;
     turn++;
-
-    // Add user message
     const userDiv = document.createElement('div');
     userDiv.className = 'message user';
     userDiv.id = `user-${thisTurn}`;
     userDiv.textContent = query;
     messagesEl.appendChild(userDiv);
     messagesEl.scrollTop = messagesEl.scrollHeight;
-
-    // Clear input
     inputEl.value = '';
     inputEl.style.height = 'auto';
     sendBtn.disabled = true;
     setStatus('connected', 'connecting...');
-
-    // Create assistant bubble
     const responseDiv = document.createElement('div');
     responseDiv.className = 'message assistant typing';
     responseDiv.id = `response-${thisTurn}`;
     responseDiv.innerHTML = '<span></span><span></span><span></span>';
     messagesEl.appendChild(responseDiv);
     messagesEl.scrollTop = messagesEl.scrollHeight;
-
-    // Connect to SSE stream
     streamResponse(query, thisTurn);
   }
 
   function streamResponse(query, thisTurn) {
     const url = `/api/stream?query=${encodeURIComponent(query)}&session=${sessionId}`;
-
     fetch(url, {
       method: 'GET',
       headers: { 'Accept': 'text/event-stream' }
@@ -128,12 +97,10 @@ function initializeChatView() {
           throw new Error(`Server error: ${response.status}`);
         }
         setStatus('connected', 'thinking...');
-
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
         let currentEventType = '';
-
         function readChunk() {
           reader.read().then(({ done, value }) => {
             if (done) {
@@ -141,21 +108,16 @@ function initializeChatView() {
               setStatus('', 'disconnected');
               return;
             }
-
             buffer += decoder.decode(value, { stream: true });
-
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
-
             for (const line of lines) {
               const trimmed = line.trim();
               if (!trimmed) continue;
-
               if (trimmed.startsWith('event: ')) {
                 currentEventType = trimmed.slice(7).trim();
                 continue;
               }
-
               if (trimmed.startsWith('data: ')) {
                 const data = trimmed.slice(6);
                 if (data === '[DONE]') {
@@ -171,11 +133,9 @@ function initializeChatView() {
                 }
               }
             }
-
             readChunk();
           });
         }
-
         readChunk();
       })
       .catch(err => {
@@ -192,7 +152,6 @@ function initializeChatView() {
   function handleServerEvent(event, thisTurn) {
     const responseEl = document.getElementById(`response-${thisTurn}`);
     if (!responseEl) return;
-
     if (event.type === 'message' || event.content) {
       const content = event.content || (event.message && event.message.content) || '';
       if (content) {
@@ -201,7 +160,6 @@ function initializeChatView() {
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
     }
-
     if (event.type === 'error') {
       responseEl.classList.remove('typing');
       responseEl.textContent = `Error: ${event.message || 'Unknown error'}`;

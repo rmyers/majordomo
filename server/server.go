@@ -24,15 +24,14 @@ var webFS embed.FS
 
 // Server serves the web interface and SSE agent stream.
 type Server struct {
-	mu          sync.RWMutex
-	cfg         *config.Config
-	sessionSrv  *session.SessionService
-	agent       *agent.Agent
-	llmManager  *llm.Manager
-	mux         *http.ServeMux
+	mu         sync.RWMutex
+	cfg        *config.Config
+	sessionSrv *session.SessionService
+	llmManager *llm.Manager
+	mux        *http.ServeMux
+	agent      *agent.Agent
 }
 
-// New creates a Server listening on the given address with the specified session service.
 func New(config *config.Config, sessionSrv *session.SessionService, agent *agent.Agent, llmManager *llm.Manager) *Server {
 	mux := http.NewServeMux()
 	server := &Server{
@@ -76,13 +75,7 @@ func (s *Server) loadRouter() {
 	// Chat page: serves the web UI with a specific session.
 	// Route: /chat/{id} → serve web UI with the specified session.
 	s.mux.HandleFunc("/chat/{id}", s.handleChat)
-
-	// SSE agent stream endpoint.
-	s.mux.HandleFunc("/api/stream", func(w http.ResponseWriter, r *http.Request) {
-		s.handleStream(w, r)
-	})
-
-	// Serve the web UI from the embedded filesystem.
+	s.mux.HandleFunc("/api/stream", s.handleStream)
 	s.mux.HandleFunc("/", s.handleRoot)
 }
 
@@ -253,30 +246,8 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	slog.Info("creating new session")
-
-	// Read the query from the request body (first user message content).
-	query := ""
-	if r.ContentLength > 0 {
-		buf := make([]byte, 1024*64)
-		n, _ := r.Body.Read(buf)
-		if n > 0 {
-			query = strings.TrimSpace(string(buf[:n]))
-		}
-	}
-
-	if query == "" {
-		sess, err := s.sessionSrv.CreateSession("")
-		if err != nil {
-			slog.Error("failed to create session", "error", err)
-			http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"id": sess.ID()})
-		return
-	}
-
-	sess, err := s.sessionSrv.CreateSession(query)
+	// Query is handled by handleStream, not here
+	sess, err := s.sessionSrv.CreateSession("")
 	if err != nil {
 		slog.Error("failed to create session", "error", err)
 		http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
@@ -400,8 +371,6 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("session resumed", "id", sess.ID())
 
-	s.agent.SetSession(sess)
-
 	messages := []llm.Message{
 		{Role: "user", Content: query},
 	}
@@ -463,40 +432,49 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		s.sendEvent(w, "session", map[string]string{"id": sess.ID()})
 	}
 
+	// Create work item and submit to agent
+	resultsCh := make(chan agent.ResultEvent, 10)
+	doneCh := make(chan error, 1)
+
+	workItem := agent.WorkItem{
+		SessionID: sessionID,
+		Session:   sess,
+		Messages:  messages,
+		Results:   resultsCh,
+		Done:      doneCh,
+	}
+
+	if !s.agent.SubmitWork(workItem) {
+		s.sendEvent(w, "error", map[string]string{"message": "agent queue full"})
+		s.sendDone(w)
+		return
+	}
+
+	// Relay agent results to SSE stream
 	go func() {
 		defer cancel()
-
-		slog.Debug("starting agent loop", "query", query, "sessionID", sess.ID())
-		results, err := s.agent.Run(ctx, messages)
-		if err != nil {
-			slog.Error("agent loop failed", "query", query, "error", err)
-			s.sendEvent(w, "error", map[string]string{"message": err.Error()})
-			s.sendDone(w)
-			return
-		}
-
-		for _, msg := range results {
-			if msg.Content != "" {
-				slog.Debug("streaming final response", "contentLen", len(msg.Content))
-				s.sendEvent(w, "message", map[string]string{"content": msg.Content})
-			}
-		}
-
-		// Record only the new messages (not the prepended history).
-		if sess != nil && historyCount >= 0 {
-			newMessages := messages[historyCount:]
-			for _, msg := range newMessages {
-				if msg.Content != "" {
-					sess.RecordMessage(msg.Role, msg.Content, nil, "")
+		for event := range resultsCh {
+			switch event.Type {
+			case "status":
+				s.sendEvent(w, "status", map[string]string{"status": "thinking", "session": sessionID})
+			case "message":
+				s.sendEvent(w, "message", map[string]string{"content": event.Content, "session": sessionID})
+			case "tool":
+				s.sendEvent(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
+			case "error":
+				s.sendEvent(w, "error", map[string]string{"message": event.Error, "session": sessionID})
+			case "done":
+				// Record results in session
+				if sess != nil && historyCount >= 0 {
+					// The agent already recorded results during runWithSession
 				}
+				s.sendDone(w)
 			}
+			flusher.Flush()
 		}
-
-		slog.Debug("stream complete", "query", query)
-		s.sendDone(w)
 	}()
 
-	flusher.Flush()
+	// Wait for client disconnect
 	<-ctx.Done()
 }
 

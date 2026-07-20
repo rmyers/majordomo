@@ -154,7 +154,7 @@ func TestHandleSettings(t *testing.T) {
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "LLM Configuration") {
-		t.Errorf("handleSettings GET body missing 'LLM Configuration': %s", body)
+		t.Errorf("handleSettings GET missing 'LLM Configuration': %s", body)
 	}
 	if !strings.Contains(body, `name="provider"`) {
 		t.Error("handleSettings GET missing provider field")
