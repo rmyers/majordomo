@@ -7,11 +7,15 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/rmyers/majordomo/llm"
 	"github.com/rmyers/majordomo/repo"
 	"github.com/rmyers/majordomo/session"
 )
+
+const maxQueueSize = 100
+const maxConcurrentSessions = 2
 
 // ToolResult holds the output of a tool execution.
 type ToolResult struct {
@@ -20,16 +24,40 @@ type ToolResult struct {
 	Err    string `json:"error,omitempty"`
 }
 
-// Agent runs the agentic loop: send messages to LLM, execute tool calls, repeat.
-type Agent struct {
-	Manager *llm.Manager
-	Tools   []llm.Tool
-	session *session.Session
+// WorkItem represents a unit of work for the agent to process.
+type WorkItem struct {
+	SessionID string
+	Session   *session.Session
+	Messages  []llm.Message
+	Results   chan ResultEvent
+	Done      chan error
 }
 
-// SetSession attaches a session for recording events to disk.
-func (a *Agent) SetSession(s *session.Session) {
-	a.session = s
+// ResultEvent is sent back through a WorkItem's Results channel.
+type ResultEvent struct {
+	Type    string // "status", "message", "tool", "error", "done"
+	Content string
+	Tool    string
+	Error   string
+	Turn    int
+}
+
+// activeSession tracks the context for an active agent session.
+type activeSession struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// Agent runs the agentic loop: send messages to LLM, execute tool calls, repeat.
+type Agent struct {
+	Manager        *llm.Manager
+	Tools          []llm.Tool
+	workQueue      chan WorkItem
+	activeSessions map[string]*activeSession
+	sem            chan struct{}
+	wg             sync.WaitGroup
+	stopCh         chan struct{}
+	mu             sync.RWMutex
 }
 
 // New creates an Agent with the standard tools (read, edit, write, bash).
@@ -69,13 +97,165 @@ func New(manager *llm.Manager) *Agent {
 				},
 			},
 		},
+		workQueue:      make(chan WorkItem, maxQueueSize),
+		activeSessions: make(map[string]*activeSession),
+		sem:            make(chan struct{}, maxConcurrentSessions),
+		stopCh:         make(chan struct{}),
 	}
 }
 
-// Run executes the agentic loop: send messages to the LLM, parse tool calls,
-// execute them, feed results back, and repeat until the LLM stops calling tools.
-// If a session is set, events are recorded to disk as JSONL.
-func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
+// WorkQueue returns the work queue channel for the server to send work.
+func (a *Agent) WorkQueue() chan<- WorkItem {
+	return a.workQueue
+}
+
+// RunMainLoop runs the agent's main processing loop in a goroutine.
+// It processes work items from the queue, limiting concurrency to maxConcurrentSessions.
+func (a *Agent) RunMainLoop() {
+	slog.Info("agent main loop started")
+	for {
+		select {
+		case <-a.stopCh:
+			slog.Info("agent main loop stopping")
+			for len(a.workQueue) > 0 {
+				<-a.workQueue
+			}
+			close(a.workQueue)
+			return
+		case item, ok := <-a.workQueue:
+			if !ok {
+				slog.Info("agent work queue closed")
+				return
+			}
+			a.wg.Add(1)
+			select {
+			case a.sem <- struct{}{}:
+				go a.processWorkItem(item)
+			default:
+				slog.Warn("agent at max concurrency, dropping work item", "sessionID", item.SessionID)
+				a.wg.Done()
+			}
+		}
+	}
+}
+
+func (a *Agent) processWorkItem(item WorkItem) {
+	defer a.wg.Done()
+	defer func() { <-a.sem }()
+
+	slog.Info("processing work item", "sessionID", item.SessionID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if item.SessionID != "" {
+		a.mu.Lock()
+		a.activeSessions[item.SessionID] = &activeSession{ctx: ctx, cancel: cancel}
+		a.mu.Unlock()
+	}
+	defer cancel()
+
+	// Send status event
+	select {
+	case item.Results <- ResultEvent{Type: "status", Content: "thinking", Turn: 0}:
+	case <-ctx.Done():
+		return
+	}
+
+	// Run the agentic loop with the item's session
+	results, err := a.runWithSession(ctx, item.Session, item.Messages)
+	if err != nil {
+		slog.Error("agent loop failed", "sessionID", item.SessionID, "error", err)
+		select {
+		case item.Results <- ResultEvent{Type: "error", Error: err.Error()}:
+		case <-ctx.Done():
+		}
+		select {
+		case item.Done <- err:
+		default:
+		}
+		return
+	}
+
+	// Send each result message
+	for i, msg := range results {
+		if msg.Content != "" {
+			select {
+			case item.Results <- ResultEvent{Type: "message", Content: msg.Content, Turn: i + 1}:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				select {
+				case item.Results <- ResultEvent{Type: "tool", Tool: tc.Function.Name}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}
+
+	// Results already recorded during runWithSession, just signal done
+	select {
+	case item.Results <- ResultEvent{Type: "done"}:
+	case <-ctx.Done():
+	}
+	select {
+	case item.Done <- nil:
+	default:
+	}
+
+	slog.Info("work item complete", "sessionID", item.SessionID)
+}
+
+// SubmitWork sends a work item to the agent's queue (non-blocking).
+func (a *Agent) SubmitWork(item WorkItem) bool {
+	select {
+	case a.workQueue <- item:
+		return true
+	default:
+		slog.Warn("agent work queue full, dropping work item", "sessionID", item.SessionID)
+		return false
+	}
+}
+
+// HandleStop cancels all active sessions.
+func (a *Agent) HandleStop() {
+	slog.Info("agent stop requested, cancelling all active sessions")
+	a.mu.Lock()
+	for id, sess := range a.activeSessions {
+		slog.Info("cancelling active session", "sessionID", id)
+		sess.cancel()
+	}
+	a.mu.Unlock()
+}
+
+// RemoveSession removes a session from the active map (called on client disconnect).
+func (a *Agent) RemoveSession(sessionID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if sess, ok := a.activeSessions[sessionID]; ok {
+		slog.Info("removing session from active map", "sessionID", sessionID)
+		sess.cancel()
+		delete(a.activeSessions, sessionID)
+	}
+}
+
+// ActiveSessionCount returns the number of currently active sessions.
+func (a *Agent) ActiveSessionCount() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.activeSessions)
+}
+
+// Close cancels all work and closes channels immediately.
+func (a *Agent) Close() {
+	slog.Info("closing agent")
+	close(a.stopCh)
+}
+
+// runWithSession executes the agentic loop with a specific session.
+func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messages []llm.Message) ([]llm.Message, error) {
 	var allMessages []llm.Message
 	for _, m := range messages {
 		allMessages = append(allMessages, m)
@@ -84,6 +264,13 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 	iteration := 0
 	for {
 		iteration++
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		slog.Debug("agent loop iteration", "iteration", iteration, "messageCount", len(allMessages))
 
 		client := a.Manager.Get()
@@ -94,8 +281,8 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 		}
 
 		// Record the assistant message in the session (with tool calls if any).
-		if a.session != nil {
-			a.session.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
+		if sess != nil {
+			sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
 		}
 
 		// If the response has tool calls, execute them and loop
@@ -126,8 +313,8 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 				}
 
 				// Record the tool result in the session.
-				if a.session != nil {
-					a.session.RecordToolResult(tc.ID, result.Output, result.Err, "")
+				if sess != nil {
+					sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
 				}
 
 				// Append the tool result message
@@ -144,6 +331,13 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message,
 		slog.Debug("agent loop complete — final response", "iteration", iteration, "contentLen", len(resp.Content))
 		return []llm.Message{*resp}, nil
 	}
+}
+
+// Run executes the agentic loop: send messages to the LLM, parse tool calls,
+// execute them, feed results back, and repeat until the LLM stops calling tools.
+// Deprecated: use runWithSession instead for the new architecture.
+func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
+	return a.runWithSession(ctx, nil, messages)
 }
 
 // executeTool runs a single tool call and returns the result.

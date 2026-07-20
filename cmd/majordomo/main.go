@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/lmittmann/tint"
@@ -17,8 +19,6 @@ import (
 
 func main() {
 	w := os.Stderr
-
-	// Set global logger with custom options
 	slog.SetDefault(slog.New(
 		tint.NewTextHandler(w, &tint.Options{
 			Level:      slog.LevelDebug,
@@ -26,27 +26,35 @@ func main() {
 			AddSource:  true,
 		}),
 	))
-
 	configDir := flag.String("config", "", "directory for config.json and sessions (default: ~/.config/majordomo)")
 	flag.Parse()
-
 	cfg := config.New(*configDir)
 	slog.Info("Using config", "model", cfg.GetModel(), "url", cfg.GetURL())
-
-	// Configure the llm Manager
 	llmManager := llm.NewManager()
 	if err := llmManager.SetInitial(cfg, ""); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Configure the agent
 	agent := agent.New(llmManager)
-
 	sessionService := session.NewSessionService(cfg)
-	srv := server.New(cfg, sessionService, agent)
-	if err := srv.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
-		os.Exit(1)
-	}
+	srv := server.New(cfg, sessionService, agent, llmManager)
+
+	// Start agent main loop
+	go agent.RunMainLoop()
+
+	// Start server
+	go func() {
+		if err := srv.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	slog.Info("shutting down...")
+	agent.Close()
+	// Don't wait for in-flight work - just exit
 }

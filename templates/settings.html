@@ -1,0 +1,58 @@
+{{define "content"}}
+<div class="settings-page">
+    <h2>LLM Configuration</h2>
+
+    {{if .Success}}
+    <div class="status-message success">{{.Success}}</div>
+    {{end}}
+
+    {{if .Error}}
+    <div class="status-message error">{{.Error}}</div>
+    {{end}}
+
+    <form method="POST" action="/settings">
+        <div class="config-field">
+            <label for="provider">Provider</label>
+            <input type="text" id="provider" name="provider" value="{{.Provider}}" placeholder="e.g. local, openai">
+        </div>
+
+        <div class="config-field">
+            <label for="model">Model name (leave empty for default)</label>
+            <input type="text" id="model" name="model" value="{{.Model}}" placeholder="e.g. mistral, llama">
+        </div>
+
+        <div class="config-field">
+            <label for="url">Server URL (leave empty for default)</label>
+            <input type="text" id="url" name="url" value="{{.URL}}" required placeholder="e.g. http://localhost:11434">
+        </div>
+
+        <div class="config-field">
+            <label for="apiKey">API Key (optional)</label>
+            <input type="password" id="apiKey" name="apiKey" placeholder="Bearer token">
+        </div>
+
+        <div class="config-field">
+            <label for="host">Server Host</label>
+            <input type="text" id="host" name="host" value="{{.Host}}" placeholder="e.g. localhost">
+        </div>
+
+        <div class="config-field">
+            <label for="port">Server Port</label>
+            <input type="number" id="port" name="port" value="{{.Port}}" pattern="[0-9]+" placeholder="e.g. 3636">
+        </div>
+
+        {{if .Host}}
+        {{if ne .Host "localhost"}}
+        <div class="status-message warning">
+            Changing server host or port requires a server restart to take effect.
+        </div>
+        {{end}}
+        {{end}}
+
+        <div class="config-actions">
+            <button type="submit" class="primary">Save</button>
+            <button type="button" onclick="window.location.href='/'">Cancel</button>
+        </div>
+    </form>
+</div>
+{{end}}

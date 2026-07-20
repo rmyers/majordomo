@@ -12,8 +12,9 @@ import (
 var files embed.FS
 
 var (
-	home = parse("home.html")
-	chat = parse("chat.html")
+	home   = parse("home.html")
+	chat   = parse("chat.html")
+	settings = parse("settings.html")
 )
 
 type HomeParams struct {
@@ -33,6 +34,23 @@ type ChatParams struct {
 
 func Chat(w io.Writer, p ChatParams) error {
 	return chat.ExecuteTemplate(w, "layout.html", p)
+}
+
+type SettingsParams struct {
+	Sessions  []session.Summary
+	SessionID string
+	Provider  string
+	Model     string
+	URL       string
+	APIKey    string
+	Host      string
+	Port      string
+	Success   string
+	Error     string
+}
+
+func Settings(w io.Writer, p SettingsParams) error {
+	return settings.ExecuteTemplate(w, "layout.html", p)
 }
 
 func parse(file string) *template.Template {

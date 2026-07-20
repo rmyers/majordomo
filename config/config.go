@@ -105,6 +105,36 @@ func (c *Config) SetAPIKey(key string) {
 	c.LLM.APIKey = key
 }
 
+// GetProvider returns the configured LLM provider.
+func (c *Config) GetProvider() string {
+	return c.LLM.Provider
+}
+
+// SetProvider sets the LLM provider.
+func (c *Config) SetProvider(provider string) {
+	c.LLM.Provider = provider
+}
+
+// GetHost returns the configured server host.
+func (c *Config) GetHost() string {
+	return c.Server.Host
+}
+
+// SetHost sets the server host.
+func (c *Config) SetHost(host string) {
+	c.Server.Host = host
+}
+
+// GetPort returns the configured server port.
+func (c *Config) GetPort() string {
+	return c.Server.Port
+}
+
+// SetPort sets the server port.
+func (c *Config) SetPort(port string) {
+	c.Server.Port = port
+}
+
 // GetSessionsDir returns the directory where session files are stored.
 func (c *Config) GetSessionsDir() (string, error) {
 	return filepath.Join(c.dir, "sessions"), nil
