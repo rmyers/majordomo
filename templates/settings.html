@@ -38,7 +38,7 @@
 
         <div class="config-field">
             <label for="port">Server Port</label>
-            <input type="text" id="port" name="port" value="{{.Port}}" pattern="[0-9]+" placeholder="e.g. 3636">
+            <input type="number" id="port" name="port" value="{{.Port}}" pattern="[0-9]+" placeholder="e.g. 3636">
         </div>
 
         {{if .Host}}
