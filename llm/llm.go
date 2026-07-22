@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"sync/atomic"
@@ -213,29 +215,30 @@ func (r *Remote) StreamChat(ctx context.Context, messages []Message, handler fun
 		return fmt.Errorf("%s returned %d: %s", r.baseURL, resp.StatusCode, string(bodyBytes))
 	}
 
-	// Parse SSE stream
+	// Parse SSE stream - read text lines and extract "data: " content
 	var fullText string
 	var fullToolCalls []ToolCall
-
-	slog.Debug("parsing SSE stream")
-	decoder := json.NewDecoder(resp.Body)
-	for decoder.More() {
-		tok, err := decoder.Token()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			slog.Error("error reading SSE stream", "error", err)
-			return fmt.Errorf("reading SSE stream: %w", err)
-		}
-		// SSE data lines start with "data: "
-		dataLine, ok := tok.(string)
-		if !ok {
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
 			continue
 		}
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		dataLine := strings.TrimPrefix(line, "data: ")
 		if dataLine == "[DONE]" {
 			slog.Debug("stream complete", "totalTextLen", len(fullText), "totalToolCalls", len(fullToolCalls))
 			break
+		}
+		if dataLine == "" {
+			continue
+		}
+		if scanner.Err() != nil {
+			slog.Error("error reading SSE stream", "error", scanner.Err())
+			return fmt.Errorf("reading SSE stream: %w", scanner.Err())
 		}
 
 		var chunk struct {

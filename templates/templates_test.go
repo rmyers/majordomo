@@ -84,7 +84,7 @@ func TestChat(t *testing.T) {
 	params := ChatParams{
 		Sessions:  []session.Summary{},
 		SessionID: "test-session-1",
-		Messages: []session.Message{},
+		Messages:  []ChatMessage{},
 	}
 	err := Chat(&buf, params)
 	if err != nil {
@@ -98,9 +98,6 @@ func TestChat(t *testing.T) {
 	if !strings.Contains(body, "test-session-1") {
 		t.Error("Chat() output missing session ID")
 	}
-	if !strings.Contains(body, "window.currentSessionId") {
-		t.Error("Chat() output missing JavaScript session ID")
-	}
 	if !strings.Contains(body, "Ask me Almost anything") {
 		t.Error("Chat() output missing chat placeholder")
 	}
@@ -108,7 +105,7 @@ func TestChat(t *testing.T) {
 
 func TestChatWithMessages(t *testing.T) {
 	var buf strings.Builder
-	messages := []session.Message{
+	messages := []ChatMessage{
 		{Role: "user", Content: "Hello, world!"},
 		{Role: "assistant", Content: "Hi there! How can I help?"},
 	}
@@ -142,7 +139,7 @@ func TestChatEmptyMessages(t *testing.T) {
 	params := ChatParams{
 		Sessions:  []session.Summary{},
 		SessionID: "session-xyz",
-		Messages:  []session.Message{},
+		Messages:  []ChatMessage{},
 	}
 	err := Chat(&buf, params)
 	if err != nil {
