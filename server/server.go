@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
@@ -300,10 +301,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	renderedMessages := make([]templates.ChatMessage, len(messages))
+	for i, msg := range messages {
+		renderedMessages[i] = templates.ChatMessage{
+			Role:    msg.Role,
+			Content: template.HTML(RenderMarkdown(msg.Content)),
+		}
+	}
 	data := templates.ChatParams{
 		Sessions:  summaries,
 		SessionID: sessionID,
-		Messages:  messages,
+		Messages:  renderedMessages,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -450,6 +458,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Accumulated text per session for streaming (text → HTML).
+	accumulated := make(map[string]string)
+
 	// Relay agent results to SSE stream
 	go func() {
 		defer cancel()
@@ -457,17 +468,24 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			switch event.Type {
 			case "status":
 				s.sendEvent(w, "status", map[string]string{"status": "thinking", "session": sessionID})
+			case "chunk":
+				accumulated[sessionID] += event.Content
+				html := RenderMarkdown(accumulated[sessionID])
+				s.sendEventHTML(w, "message", html)
 			case "message":
-				s.sendEvent(w, "message", map[string]string{"content": event.Content, "session": sessionID})
+				accumulated[sessionID] = event.Content
+				html := RenderMarkdown(accumulated[sessionID])
+				s.sendEventHTML(w, "message", html)
+			case "error":
+				s.sendEventHTML(w, "error", "<span class='error'>"+RenderMarkdown(event.Error)+"</span>")
 			case "tool":
 				s.sendEvent(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
-			case "error":
-				s.sendEvent(w, "error", map[string]string{"message": event.Error, "session": sessionID})
 			case "done":
 				// Record results in session
 				if sess != nil && historyCount >= 0 {
 					// The agent already recorded results during runWithSession
 				}
+				delete(accumulated, sessionID)
 				s.sendDone(w)
 			}
 			flusher.Flush()
@@ -478,9 +496,16 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	<-ctx.Done()
 }
 
-// sendEvent sends a single SSE event.
+// sendEvent sends a single SSE event with JSON data.
 func (s *Server) sendEvent(w http.ResponseWriter, event string, data map[string]string) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, mustJSON(data))
+}
+
+// sendEventHTML sends a single SSE event with raw HTML data.
+func (s *Server) sendEventHTML(w http.ResponseWriter, event string, html string) {
+	// Collapse HTML to a single line for valid SSE format
+	singleLine := strings.ReplaceAll(html, "\n", " ")
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, singleLine)
 }
 
 // sendDone sends the [DONE] marker.

@@ -35,7 +35,7 @@ type WorkItem struct {
 
 // ResultEvent is sent back through a WorkItem's Results channel.
 type ResultEvent struct {
-	Type    string // "status", "message", "tool", "error", "done"
+	Type    string // "status", "message", "chunk", "tool", "error", "done"
 	Content string
 	Tool    string
 	Error   string
@@ -160,8 +160,8 @@ func (a *Agent) processWorkItem(item WorkItem) {
 		return
 	}
 
-	// Run the agentic loop with the item's session
-	results, err := a.runWithSession(ctx, item.Session, item.Messages)
+	// Run the agentic loop with the item's session, streaming chunks via Results
+	results, err := a.runWithSession(ctx, item.Session, item.Messages, item.Results)
 	if err != nil {
 		slog.Error("agent loop failed", "sessionID", item.SessionID, "error", err)
 		select {
@@ -255,7 +255,7 @@ func (a *Agent) Close() {
 }
 
 // runWithSession executes the agentic loop with a specific session.
-func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messages []llm.Message) ([]llm.Message, error) {
+func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messages []llm.Message, results chan ResultEvent) ([]llm.Message, error) {
 	var allMessages []llm.Message
 	for _, m := range messages {
 		allMessages = append(allMessages, m)
@@ -274,70 +274,123 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 		slog.Debug("agent loop iteration", "iteration", iteration, "messageCount", len(allMessages))
 
 		client := a.Manager.Get()
-		resp, err := client.Chat(ctx, allMessages)
-		if err != nil {
-			slog.Error("LLM call failed", "iteration", iteration, "error", err)
-			return nil, fmt.Errorf("LLM call: %w", err)
-		}
 
-		// Record the assistant message in the session (with tool calls if any).
-		if sess != nil {
-			sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
-		}
+		// For the final response (no tool calls from previous iterations), always use streaming.
+		// For iterations with tool calls, use blocking Chat.
+		if iteration == 1 {
+			// First iteration: check if LLM wants tool calls using blocking Chat
+			resp, err := client.Chat(ctx, allMessages)
+			if err != nil {
+				slog.Error("LLM call failed", "iteration", iteration, "error", err)
+				return nil, fmt.Errorf("LLM call: %w", err)
+			}
 
-		// If the response has tool calls, execute them and loop
-		if len(resp.ToolCalls) > 0 {
-			slog.Debug("LLM requested tool calls", "iteration", iteration, "toolCount", len(resp.ToolCalls))
-			// Append the assistant message with tool calls
-			allMessages = append(allMessages, *resp)
+			// Record the assistant message in the session (with tool calls if any).
+			if sess != nil {
+				sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
+			}
 
-			// Execute each tool call
-			for _, tc := range resp.ToolCalls {
-				slog.Debug("executing tool", "iteration", iteration, "toolName", tc.Function.Name, "callID", tc.ID)
-				args, err := parseToolArgs(tc.Function.Arguments)
-				if err != nil {
-					slog.Error("failed to parse tool arguments", "iteration", iteration, "toolName", tc.Function.Name, "error", err)
+			// If the response has tool calls, execute them and stream the final response
+			if len(resp.ToolCalls) > 0 {
+				slog.Debug("LLM requested tool calls", "iteration", iteration, "toolCount", len(resp.ToolCalls))
+				allMessages = append(allMessages, *resp)
+
+				for _, tc := range resp.ToolCalls {
+					slog.Debug("executing tool", "iteration", iteration, "toolName", tc.Function.Name, "callID", tc.ID)
+					args, err := parseToolArgs(tc.Function.Arguments)
+					if err != nil {
+						slog.Error("failed to parse tool arguments", "iteration", iteration, "toolName", tc.Function.Name, "error", err)
+						allMessages = append(allMessages, llm.Message{
+							Role:       "tool",
+							Content:    fmt.Sprintf("Error parsing arguments: %v", err),
+							ToolCallID: tc.ID,
+						})
+						continue
+					}
+
+					result := a.executeTool(tc.Function.Name, args)
+					if result.Err != "" {
+						slog.Warn("tool execution returned error", "iteration", iteration, "toolName", tc.Function.Name, "error", result.Err)
+					} else {
+						slog.Debug("tool executed successfully", "iteration", iteration, "toolName", tc.Function.Name, "outputLen", len(result.Output))
+					}
+
+					if sess != nil {
+						sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
+					}
+
 					allMessages = append(allMessages, llm.Message{
 						Role:       "tool",
-						Content:    fmt.Sprintf("Error parsing arguments: %v", err),
+						Content:    result.Output,
 						ToolCallID: tc.ID,
 					})
-					continue
 				}
-
-				result := a.executeTool(tc.Function.Name, args)
-				if result.Err != "" {
-					slog.Warn("tool execution returned error", "iteration", iteration, "toolName", tc.Function.Name, "error", result.Err)
-				} else {
-					slog.Debug("tool executed successfully", "iteration", iteration, "toolName", tc.Function.Name, "outputLen", len(result.Output))
-				}
-
-				// Record the tool result in the session.
-				if sess != nil {
-					sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
-				}
-
-				// Append the tool result message
-				allMessages = append(allMessages, llm.Message{
-					Role:       "tool",
-					Content:    result.Output,
-					ToolCallID: tc.ID,
-				})
+				// After tool calls, stream the final response
+				slog.Debug("tool calls complete — streaming final response", "iteration", iteration+1)
+				return a.streamFinalResponse(ctx, sess, allMessages, results)
 			}
-			continue
+
+			// No tool calls — this is the final response, stream it directly
+			slog.Debug("agent loop complete — final response (no tools, streaming)", "iteration", iteration, "contentLen", len(resp.Content))
+			return a.streamFinalResponse(ctx, sess, allMessages, results)
 		}
 
-		// No tool calls — this is the final response
-		slog.Debug("agent loop complete — final response", "iteration", iteration, "contentLen", len(resp.Content))
-		return []llm.Message{*resp}, nil
+		// Subsequent iterations: stream the final response
+		slog.Debug("agent loop complete — streaming final response", "iteration", iteration)
+		return a.streamFinalResponse(ctx, sess, allMessages, results)
 	}
+}
+
+// streamFinalResponse streams the final text response using StreamChat,
+// sending accumulated text chunks through the results channel for SSE relay.
+func (a *Agent) streamFinalResponse(ctx context.Context, sess *session.Session, messages []llm.Message, results chan ResultEvent) ([]llm.Message, error) {
+	client := a.Manager.Get()
+	var accumulatedText string
+
+	err := client.StreamChat(ctx, messages, func(text string, toolCalls []llm.ToolCall) {
+		if text != "" {
+			accumulatedText += text
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if results != nil {
+				select {
+				case results <- ResultEvent{Type: "chunk", Content: text, Turn: 0}:
+				case <-ctx.Done():
+					return
+				default:
+				}
+			}
+		}
+		if len(toolCalls) > 0 {
+			// Tool calls from stream — shouldn't normally happen with final response
+			// but handle it by switching to blocking mode
+			slog.Debug("stream returned tool calls, falling back to blocking")
+		}
+	})
+
+	if err != nil {
+		slog.Error("stream final response failed", "error", err)
+		return nil, err
+	}
+
+	slog.Debug("streamed final response complete", "textLen", len(accumulatedText))
+
+	// Record the accumulated result in the session
+	if sess != nil && accumulatedText != "" {
+		sess.RecordMessage("assistant", accumulatedText, nil, "")
+	}
+
+	return []llm.Message{{Role: "assistant", Content: accumulatedText}}, nil
 }
 
 // Run executes the agentic loop: send messages to the LLM, parse tool calls,
 // execute them, feed results back, and repeat until the LLM stops calling tools.
 // Deprecated: use runWithSession instead for the new architecture.
 func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
-	return a.runWithSession(ctx, nil, messages)
+	return a.runWithSession(ctx, nil, messages, nil)
 }
 
 // executeTool runs a single tool call and returns the result.

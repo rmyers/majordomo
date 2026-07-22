@@ -29,7 +29,12 @@ func Home(w io.Writer, p HomeParams) error {
 type ChatParams struct {
 	Sessions  []session.Summary
 	SessionID string
-	Messages  []session.Message
+	Messages  []ChatMessage
+}
+
+type ChatMessage struct {
+	Role    string
+	Content template.HTML
 }
 
 func Chat(w io.Writer, p ChatParams) error {

@@ -76,7 +76,7 @@ function initializeChatView() {
     inputEl.value = '';
     inputEl.style.height = 'auto';
     sendBtn.disabled = true;
-    setStatus('connected', 'connecting...');
+    setStatus('connected', 'thinking...');
     const responseDiv = document.createElement('div');
     responseDiv.className = 'message assistant typing';
     responseDiv.id = `response-${thisTurn}`;
@@ -129,7 +129,8 @@ function initializeChatView() {
                   parsed.type = currentEventType;
                   handleServerEvent(parsed, thisTurn);
                 } catch (e) {
-                  // Not JSON, ignore
+                  // Not JSON - treat as HTML content (rendered markdown)
+                  handleHtmlEvent(currentEventType, data, thisTurn);
                 }
               }
             }
@@ -142,11 +143,27 @@ function initializeChatView() {
         const el = document.getElementById(`response-${thisTurn}`);
         if (el) {
           el.classList.remove('typing');
-          el.textContent = `Error: ${err.message}`;
+          el.innerHTML = `<span class='error'>Error: ${escapeHTML(err.message)}</span>`;
         }
         sendBtn.disabled = false;
         setStatus('error', 'error');
       });
+  }
+
+  function handleHtmlEvent(eventType, html, thisTurn) {
+    const responseEl = document.getElementById(`response-${thisTurn}`);
+    if (!responseEl) return;
+    if (eventType === 'message') {
+      responseEl.classList.remove('typing');
+      responseEl.innerHTML = html;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+    if (eventType === 'error') {
+      responseEl.classList.remove('typing');
+      responseEl.innerHTML = html;
+      sendBtn.disabled = false;
+      setStatus('error', 'error');
+    }
   }
 
   function handleServerEvent(event, thisTurn) {
@@ -166,5 +183,13 @@ function initializeChatView() {
       sendBtn.disabled = false;
       setStatus('error', 'error');
     }
+  }
+
+  function escapeHTML(s) {
+    return s.replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
   }
 }
