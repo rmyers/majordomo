@@ -161,6 +161,10 @@ func (a *Agent) processWorkItem(item WorkItem) {
 	}
 
 	// Run the agentic loop with the item's session, streaming chunks via Results
+	if item.Session == nil {
+		slog.Error("session is required but was nil", "sessionID", item.SessionID)
+		return
+	}
 	results, err := a.runWithSession(ctx, item.Session, item.Messages, item.Results)
 	if err != nil {
 		slog.Error("agent loop failed", "sessionID", item.SessionID, "error", err)
@@ -285,13 +289,9 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 				return nil, fmt.Errorf("LLM call: %w", err)
 			}
 
-			// Record the assistant message in the session (with tool calls if any).
-			if sess != nil {
-				sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
-			}
-
-			// If the response has tool calls, execute them and stream the final response
+			// If the response has tool calls, record the assistant message and execute them
 			if len(resp.ToolCalls) > 0 {
+				sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
 				slog.Debug("LLM requested tool calls", "iteration", iteration, "toolCount", len(resp.ToolCalls))
 				allMessages = append(allMessages, *resp)
 
@@ -315,9 +315,7 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 						slog.Debug("tool executed successfully", "iteration", iteration, "toolName", tc.Function.Name, "outputLen", len(result.Output))
 					}
 
-					if sess != nil {
-						sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
-					}
+					sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
 
 					allMessages = append(allMessages, llm.Message{
 						Role:       "tool",
@@ -379,18 +377,11 @@ func (a *Agent) streamFinalResponse(ctx context.Context, sess *session.Session, 
 	slog.Debug("streamed final response complete", "textLen", len(accumulatedText))
 
 	// Record the accumulated result in the session
-	if sess != nil && accumulatedText != "" {
+	if accumulatedText != "" {
 		sess.RecordMessage("assistant", accumulatedText, nil, "")
 	}
 
 	return []llm.Message{{Role: "assistant", Content: accumulatedText}}, nil
-}
-
-// Run executes the agentic loop: send messages to the LLM, parse tool calls,
-// execute them, feed results back, and repeat until the LLM stops calling tools.
-// Deprecated: use runWithSession instead for the new architecture.
-func (a *Agent) Run(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
-	return a.runWithSession(ctx, nil, messages, nil)
 }
 
 // executeTool runs a single tool call and returns the result.

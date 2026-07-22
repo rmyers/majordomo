@@ -379,50 +379,46 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("session resumed", "id", sess.ID())
 
+	sess.RecordMessage("user", query, nil, "")
+
 	messages := []llm.Message{
 		{Role: "user", Content: query},
 	}
 
-	if sess != nil {
-		events, histErr := s.sessionSrv.SessionHistory(sess.ID())
-		if histErr != nil {
-			slog.Warn("failed to load session history for LLM context", "sessionID", sess.ID(), "error", histErr)
-		} else {
-			var history []llm.Message
-			for _, ev := range events {
-				if ev.Type == "message" && ev.Message != nil {
-					var msg session.Message
-					if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
-						var toolCalls []llm.ToolCall
-						for _, stc := range msg.ToolCalls {
-							toolCalls = append(toolCalls, llm.ToolCall{
-								ID:   stc.ID,
-								Type: "function",
-								Function: llm.ToolFunctionArg{
-									Name:      stc.Name,
-									Arguments: stc.Args,
-								},
-							})
-						}
-						history = append(history, llm.Message{
-							Role:       msg.Role,
-							Content:    msg.Content,
-							ToolCalls:  toolCalls,
-							ToolCallID: msg.ToolCallID,
+	events, histErr := s.sessionSrv.SessionHistory(sess.ID())
+	if histErr != nil {
+		slog.Warn("failed to load session history for LLM context", "sessionID", sess.ID(), "error", histErr)
+	} else {
+		var history []llm.Message
+		for _, ev := range events {
+			if ev.Type == "message" && ev.Message != nil {
+				var msg session.Message
+				if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
+					var toolCalls []llm.ToolCall
+					for _, stc := range msg.ToolCalls {
+						toolCalls = append(toolCalls, llm.ToolCall{
+							ID:   stc.ID,
+							Type: "function",
+							Function: llm.ToolFunctionArg{
+								Name:      stc.Name,
+								Arguments: stc.Args,
+							},
 						})
 					}
+					history = append(history, llm.Message{
+						Role:       msg.Role,
+						Content:    msg.Content,
+						ToolCalls:  toolCalls,
+						ToolCallID: msg.ToolCallID,
+					})
 				}
 			}
-			if len(history) > 0 {
-				slog.Info("prepending session history to LLM context", "sessionID", sess.ID(), "historyCount", len(history))
-				messages = append(history, messages...)
-			}
+		}
+		if len(history) > 0 {
+			slog.Info("prepending session history to LLM context", "sessionID", sess.ID(), "historyCount", len(history))
+			messages = append(history, messages...)
 		}
 	}
-
-	// Track how many messages are already in the session history.
-	// We only record the new messages (query + agent response), not the history.
-	historyCount := len(messages) - 1
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -436,9 +432,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if sess != nil {
-		s.sendEvent(w, "session", map[string]string{"id": sess.ID()})
-	}
+	s.sendEvent(w, "session", map[string]string{"id": sess.ID()})
 
 	// Create work item and submit to agent
 	resultsCh := make(chan agent.ResultEvent, 10)
@@ -481,10 +475,6 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			case "tool":
 				s.sendEvent(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
 			case "done":
-				// Record results in session
-				if sess != nil && historyCount >= 0 {
-					// The agent already recorded results during runWithSession
-				}
 				delete(accumulated, sessionID)
 				s.sendDone(w)
 			}
