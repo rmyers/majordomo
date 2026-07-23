@@ -379,50 +379,46 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("session resumed", "id", sess.ID())
 
+	sess.RecordMessage("user", query, nil, "")
+
 	messages := []llm.Message{
 		{Role: "user", Content: query},
 	}
 
-	if sess != nil {
-		events, histErr := s.sessionSrv.SessionHistory(sess.ID())
-		if histErr != nil {
-			slog.Warn("failed to load session history for LLM context", "sessionID", sess.ID(), "error", histErr)
-		} else {
-			var history []llm.Message
-			for _, ev := range events {
-				if ev.Type == "message" && ev.Message != nil {
-					var msg session.Message
-					if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
-						var toolCalls []llm.ToolCall
-						for _, stc := range msg.ToolCalls {
-							toolCalls = append(toolCalls, llm.ToolCall{
-								ID:   stc.ID,
-								Type: "function",
-								Function: llm.ToolFunctionArg{
-									Name:      stc.Name,
-									Arguments: stc.Args,
-								},
-							})
-						}
-						history = append(history, llm.Message{
-							Role:       msg.Role,
-							Content:    msg.Content,
-							ToolCalls:  toolCalls,
-							ToolCallID: msg.ToolCallID,
+	events, histErr := s.sessionSrv.SessionHistory(sess.ID())
+	if histErr != nil {
+		slog.Warn("failed to load session history for LLM context", "sessionID", sess.ID(), "error", histErr)
+	} else {
+		var history []llm.Message
+		for _, ev := range events {
+			if ev.Type == "message" && ev.Message != nil {
+				var msg session.Message
+				if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
+					var toolCalls []llm.ToolCall
+					for _, stc := range msg.ToolCalls {
+						toolCalls = append(toolCalls, llm.ToolCall{
+							ID:   stc.ID,
+							Type: "function",
+							Function: llm.ToolFunctionArg{
+								Name:      stc.Name,
+								Arguments: stc.Args,
+							},
 						})
 					}
+					history = append(history, llm.Message{
+						Role:       msg.Role,
+						Content:    msg.Content,
+						ToolCalls:  toolCalls,
+						ToolCallID: msg.ToolCallID,
+					})
 				}
 			}
-			if len(history) > 0 {
-				slog.Info("prepending session history to LLM context", "sessionID", sess.ID(), "historyCount", len(history))
-				messages = append(history, messages...)
-			}
+		}
+		if len(history) > 0 {
+			slog.Info("prepending session history to LLM context", "sessionID", sess.ID(), "historyCount", len(history))
+			messages = append(history, messages...)
 		}
 	}
-
-	// Track how many messages are already in the session history.
-	// We only record the new messages (query + agent response), not the history.
-	historyCount := len(messages) - 1
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -436,9 +432,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if sess != nil {
-		s.sendEvent(w, "session", map[string]string{"id": sess.ID()})
-	}
+	s.sendEventJSON(w, "session", map[string]string{"id": sess.ID()})
 
 	// Create work item and submit to agent
 	resultsCh := make(chan agent.ResultEvent, 10)
@@ -453,7 +447,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.agent.SubmitWork(workItem) {
-		s.sendEvent(w, "error", map[string]string{"message": "agent queue full"})
+		s.sendEventJSON(w, "error", map[string]string{"message": "agent queue full"})
 		s.sendDone(w)
 		return
 	}
@@ -467,7 +461,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		for event := range resultsCh {
 			switch event.Type {
 			case "status":
-				s.sendEvent(w, "status", map[string]string{"status": "thinking", "session": sessionID})
+				s.sendEventJSON(w, "status", map[string]string{"status": "thinking", "session": sessionID})
 			case "chunk":
 				accumulated[sessionID] += event.Content
 				html := RenderMarkdown(accumulated[sessionID])
@@ -479,12 +473,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			case "error":
 				s.sendEventHTML(w, "error", "<span class='error'>"+RenderMarkdown(event.Error)+"</span>")
 			case "tool":
-				s.sendEvent(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
+				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
 			case "done":
-				// Record results in session
-				if sess != nil && historyCount >= 0 {
-					// The agent already recorded results during runWithSession
-				}
 				delete(accumulated, sessionID)
 				s.sendDone(w)
 			}
@@ -496,21 +486,26 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	<-ctx.Done()
 }
 
-// sendEvent sends a single SSE event with JSON data.
-func (s *Server) sendEvent(w http.ResponseWriter, event string, data map[string]string) {
+// sendEventJSON sends a single SSE event with JSON data.
+func (s *Server) sendEventJSON(w http.ResponseWriter, event string, data map[string]string) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, mustJSON(data))
 }
 
 // sendEventHTML sends a single SSE event with raw HTML data.
 func (s *Server) sendEventHTML(w http.ResponseWriter, event string, html string) {
-	// Collapse HTML to a single line for valid SSE format
-	singleLine := strings.ReplaceAll(html, "\n", " ")
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, singleLine)
+	// Strip the trailing newline so Split does not produce an empty trailing element.
+	html = strings.TrimSuffix(html, "\n")
+	lines := strings.Split(html, "\n")
+	fmt.Fprintf(w, "event: %s\n", event)
+	for _, line := range lines {
+		fmt.Fprintf(w, "data: %s\n", line)
+	}
+	fmt.Fprintf(w, "\n")
 }
 
 // sendDone sends the [DONE] marker.
 func (s *Server) sendDone(w http.ResponseWriter) {
-	fmt.Fprint(w, "data: [DONE]\n\n")
+	fmt.Fprint(w, "event: done\ndata: [DONE]\n\n")
 }
 
 // mustJSON marshals v to JSON.

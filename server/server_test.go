@@ -406,3 +406,88 @@ func TestRootNotFound(t *testing.T) {
 		t.Errorf("handleRoot() with non-root path status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
+
+func TestSendEventHTML(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	cases := []struct {
+		name  string
+		html  string
+		lines []string
+	}{
+		{
+			name: "simple paragraph",
+			html: "<p>I'll keep it</p>\n",
+			lines: []string{
+				"event: message",
+				"data: <p>I'll keep it</p>",
+				"",
+				"",
+			},
+		},
+		{
+			name: "shorter paragraph",
+			html: "<p>I'll keep it short and sweet one</p>\n",
+			lines: []string{
+				"event: message",
+				"data: <p>I'll keep it short and sweet one</p>",
+				"",
+				"",
+			},
+		},
+		{
+			name: "paragraph with empty code block",
+			html: "<p>I'll keep it short and sweet one last time:</p>\n<pre><code></code></pre>\n",
+			lines: []string{
+				"event: message",
+				"data: <p>I'll keep it short and sweet one last time:</p>",
+				"data: <pre><code></code></pre>",
+				"",
+				"",
+			},
+		},
+		{
+			name: "paragraph with python code",
+			html: "<p>I'll keep it short and sweet one last time:</p>\n<pre><code class=\"language-python\">import pytest\n</code></pre>\n",
+			lines: []string{
+				"event: message",
+				"data: <p>I'll keep it short and sweet one last time:</p>",
+				"data: <pre><code class=\"language-python\">import pytest",
+				"data: </code></pre>",
+				"",
+				"",
+			},
+		},
+		{
+			name: "python code with blank line",
+			html: "<p>I'll keep it short and sweet one last time:</p>\n<pre><code class=\"language-python\">import pytest\n\ndef is_even\n</code></pre>\n",
+			lines: []string{
+				"event: message",
+				"data: <p>I'll keep it short and sweet one last time:</p>",
+				"data: <pre><code class=\"language-python\">import pytest",
+				"data: ",
+				"data: def is_even",
+				"data: </code></pre>",
+				"",
+				"",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			srv.sendEventHTML(rec, "message", tc.html)
+
+			got := strings.Split(rec.Body.String(), "\n")
+			if len(got) != len(tc.lines) {
+				t.Fatalf("got %d lines, want %d\nbody:\n%s", len(got), len(tc.lines), rec.Body.String())
+			}
+			for i, want := range tc.lines {
+				if got[i] != want {
+					t.Errorf("line %d:\n  got: %q\n  want: %q", i, got[i], want)
+				}
+			}
+		})
+	}
+}
