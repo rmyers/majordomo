@@ -501,7 +501,7 @@ func (s *Server) sendEventHTML(w http.ResponseWriter, event string, html string)
 
 // sendDone sends the [DONE] marker.
 func (s *Server) sendDone(w http.ResponseWriter) {
-	fmt.Fprint(w, "data: [DONE]\n\n")
+	fmt.Fprint(w, "event: done\ndata: [DONE]\n\n")
 }
 
 // mustJSON marshals v to JSON.

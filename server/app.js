@@ -88,112 +88,59 @@ function initializeChatView() {
 
   function streamResponse(query, thisTurn) {
     const url = `/api/stream?query=${encodeURIComponent(query)}&session=${sessionId}`;
-    fetch(url, {
-      method: 'GET',
-      headers: { 'Accept': 'text/event-stream' }
-    })
-      .then(response => {
-        if (!response.ok) {
-          throw new Error(`Server error: ${response.status}`);
-        }
-        setStatus('connected', 'thinking...');
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let currentEventType = '';
-        function readChunk() {
-          reader.read().then(({ done, value }) => {
-            if (done) {
-              sendBtn.disabled = false;
-              setStatus('', 'disconnected');
-              return;
-            }
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-              if (trimmed.startsWith('event: ')) {
-                currentEventType = trimmed.slice(7).trim();
-                continue;
-              }
-              if (trimmed.startsWith('data: ')) {
-                const data = trimmed.slice(6);
-                if (data === '[DONE]') {
-                  setStatus('', 'disconnected');
-                  continue;
-                }
-                try {
-                  const parsed = JSON.parse(data);
-                  parsed.type = currentEventType;
-                  handleServerEvent(parsed, thisTurn);
-                } catch (e) {
-                  // Not JSON - treat as HTML content (rendered markdown)
-                  handleHtmlEvent(currentEventType, data, thisTurn);
-                }
-              }
-            }
-            readChunk();
-          });
-        }
-        readChunk();
-      })
-      .catch(err => {
-        const el = document.getElementById(`response-${thisTurn}`);
-        if (el) {
-          el.classList.remove('typing');
-          el.innerHTML = `<span class='error'>Error: ${escapeHTML(err.message)}</span>`;
-        }
-        sendBtn.disabled = false;
-        setStatus('error', 'error');
-      });
-  }
+    const source = new EventSource(url);
 
-  function decodeSSENewlines(html) {
-    return html.replace(/\\n/g, '<br>');
-  }
+    function decodeSSENewlines(html) {
+      return html.replace(/\\n/g, '<br>');
+    }
 
-  function handleHtmlEvent(eventType, html, thisTurn) {
-    const responseEl = document.getElementById(`response-${thisTurn}`);
-    if (!responseEl) return;
-    if (eventType === 'message') {
+    source.addEventListener('session', (e) => {
+      setStatus('connected', 'thinking...');
+    });
+
+    source.addEventListener('status', (e) => {
+      setStatus('connected', 'thinking...');
+    });
+
+    source.addEventListener('message', (e) => {
+      const responseEl = document.getElementById(`response-${thisTurn}`);
+      if (!responseEl) return;
       responseEl.classList.remove('typing');
-      responseEl.innerHTML = decodeSSENewlines(html);
+      responseEl.innerHTML = decodeSSENewlines(e.data);
       messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
-    if (eventType === 'error') {
+    });
+
+    source.addEventListener('error', (e) => {
+      const responseEl = document.getElementById(`response-${thisTurn}`);
+      if (!responseEl) return;
       responseEl.classList.remove('typing');
-      responseEl.innerHTML = decodeSSENewlines(html);
+      responseEl.innerHTML = decodeSSENewlines(e.data);
       sendBtn.disabled = false;
       setStatus('error', 'error');
-    }
-  }
+    });
 
-  function handleServerEvent(event, thisTurn) {
-    const responseEl = document.getElementById(`response-${thisTurn}`);
-    if (!responseEl) return;
-    if (event.type === 'message' || event.content) {
-      const content = event.content || (event.message && event.message.content) || '';
-      if (content) {
-        responseEl.classList.remove('typing');
-        responseEl.textContent = content;
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+    source.addEventListener('tool', (e) => {
+      const data = JSON.parse(e.data);
+      const responseEl = document.getElementById(`response-${thisTurn}`);
+      if (!responseEl) return;
+      responseEl.classList.add('typing');
+    });
+
+    source.addEventListener('done', (e) => {
+      source.close();
+      sendBtn.disabled = false;
+      setStatus('', 'disconnected');
+    });
+
+    source.onerror = () => {
+      source.close();
+      const el = document.getElementById(`response-${thisTurn}`);
+      if (el) {
+        el.classList.remove('typing');
+        el.innerHTML = `<span class='error'>Connection error</span>`;
       }
-    }
-    if (event.type === 'error') {
-      responseEl.classList.remove('typing');
-      responseEl.textContent = `Error: ${event.message || 'Unknown error'}`;
       sendBtn.disabled = false;
       setStatus('error', 'error');
-    }
-  }
-
-  function escapeHTML(s) {
-    return s.replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
+    };
   }
 }
