@@ -493,10 +493,14 @@ func (s *Server) sendEventJSON(w http.ResponseWriter, event string, data map[str
 
 // sendEventHTML sends a single SSE event with raw HTML data.
 func (s *Server) sendEventHTML(w http.ResponseWriter, event string, html string) {
-	// Collapse HTML to a single line for valid SSE format
-	trimmed := strings.TrimSuffix(html, "\n")
-	singleLine := strings.ReplaceAll(trimmed, "\n", "\\n")
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, singleLine)
+	// Strip the trailing newline so Split does not produce an empty trailing element.
+	html = strings.TrimSuffix(html, "\n")
+	lines := strings.Split(html, "\n")
+	fmt.Fprintf(w, "event: %s\n", event)
+	for _, line := range lines {
+		fmt.Fprintf(w, "data: %s\n", line)
+	}
+	fmt.Fprintf(w, "\n")
 }
 
 // sendDone sends the [DONE] marker.
