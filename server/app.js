@@ -150,17 +150,21 @@ function initializeChatView() {
       });
   }
 
+  function decodeSSENewlines(html) {
+    return html.replace(/\\n/g, '<br>');
+  }
+
   function handleHtmlEvent(eventType, html, thisTurn) {
     const responseEl = document.getElementById(`response-${thisTurn}`);
     if (!responseEl) return;
     if (eventType === 'message') {
       responseEl.classList.remove('typing');
-      responseEl.innerHTML = html;
+      responseEl.innerHTML = decodeSSENewlines(html);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
     if (eventType === 'error') {
       responseEl.classList.remove('typing');
-      responseEl.innerHTML = html;
+      responseEl.innerHTML = decodeSSENewlines(html);
       sendBtn.disabled = false;
       setStatus('error', 'error');
     }

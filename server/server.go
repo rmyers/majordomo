@@ -432,7 +432,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.sendEvent(w, "session", map[string]string{"id": sess.ID()})
+	s.sendEventJSON(w, "session", map[string]string{"id": sess.ID()})
 
 	// Create work item and submit to agent
 	resultsCh := make(chan agent.ResultEvent, 10)
@@ -447,7 +447,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.agent.SubmitWork(workItem) {
-		s.sendEvent(w, "error", map[string]string{"message": "agent queue full"})
+		s.sendEventJSON(w, "error", map[string]string{"message": "agent queue full"})
 		s.sendDone(w)
 		return
 	}
@@ -461,7 +461,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		for event := range resultsCh {
 			switch event.Type {
 			case "status":
-				s.sendEvent(w, "status", map[string]string{"status": "thinking", "session": sessionID})
+				s.sendEventJSON(w, "status", map[string]string{"status": "thinking", "session": sessionID})
 			case "chunk":
 				accumulated[sessionID] += event.Content
 				html := RenderMarkdown(accumulated[sessionID])
@@ -473,7 +473,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			case "error":
 				s.sendEventHTML(w, "error", "<span class='error'>"+RenderMarkdown(event.Error)+"</span>")
 			case "tool":
-				s.sendEvent(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
+				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
 			case "done":
 				delete(accumulated, sessionID)
 				s.sendDone(w)
@@ -486,15 +486,16 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	<-ctx.Done()
 }
 
-// sendEvent sends a single SSE event with JSON data.
-func (s *Server) sendEvent(w http.ResponseWriter, event string, data map[string]string) {
+// sendEventJSON sends a single SSE event with JSON data.
+func (s *Server) sendEventJSON(w http.ResponseWriter, event string, data map[string]string) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, mustJSON(data))
 }
 
 // sendEventHTML sends a single SSE event with raw HTML data.
 func (s *Server) sendEventHTML(w http.ResponseWriter, event string, html string) {
 	// Collapse HTML to a single line for valid SSE format
-	singleLine := strings.ReplaceAll(html, "\n", " ")
+	trimmed := strings.TrimSuffix(html, "\n")
+	singleLine := strings.ReplaceAll(trimmed, "\n", "\\n")
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, singleLine)
 }
 
