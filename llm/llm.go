@@ -93,14 +93,51 @@ type ParamSchema struct {
 	Required    bool
 }
 
+// toolsMarshal is the internal JSON representation for the OpenAI API.
+type toolsMarshal struct {
+	Type     string                 `json:"type"`
+	Function toolFunctionDefinition `json:"function"`
+}
+
+type toolFunctionDefinition struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Parameters  map[string]any         `json:"parameters"`
+}
+
+// MarshalJSON serializes Tool in the format expected by the OpenAI API.
+func (t Tool) MarshalJSON() ([]byte, error) {
+	properties := make(map[string]any)
+	required := []string{}
+	for k, v := range t.Params {
+		prop := map[string]any{"type": v.Type, "description": v.Description}
+		properties[k] = prop
+		if v.Required {
+			required = append(required, k)
+		}
+	}
+	return json.Marshal(toolsMarshal{
+		Type: "function",
+		Function: toolFunctionDefinition{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": properties,
+				"required":   required,
+			},
+		},
+	})
+}
+
 // Client speaks to an OpenAI-compatible /v1/chat/completions API.
 type Client interface {
 	// Chat sends messages and returns the full assistant response.
-	Chat(ctx context.Context, messages []Message) (*Message, error)
+	Chat(ctx context.Context, messages []Message, tools []Tool) (*Message, error)
 	// StreamChat sends messages and calls handler for each text chunk.
 	// When the response contains tool_calls, the handler receives a nil text
 	// and a ToolCalls slice. When done, handler is called with text="" and nil ToolCalls.
-	StreamChat(ctx context.Context, messages []Message, handler func(text string, toolCalls []ToolCall)) error
+	StreamChat(ctx context.Context, messages []Message, tools []Tool, handler func(text string, toolCalls []ToolCall)) error
 	// Name returns a human-readable identifier for this client.
 	Name() string
 	// Close the connection
@@ -120,13 +157,14 @@ func (r *Remote) Name() string {
 }
 
 // Chat sends messages and returns the full assistant response.
-func (r *Remote) Chat(ctx context.Context, messages []Message) (*Message, error) {
+func (r *Remote) Chat(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
 	slog.Debug("Chat request", "model", r.model, "url", r.baseURL, "messageCount", len(messages))
 
 	body, err := json.Marshal(map[string]any{
 		"model":    r.model,
 		"messages": messages,
 		"stream":   false,
+		"tools":    tools,
 	})
 	if err != nil {
 		return nil, err
@@ -177,13 +215,14 @@ func (r *Remote) Chat(ctx context.Context, messages []Message) (*Message, error)
 }
 
 // StreamChat sends messages and streams the response via the handler.
-func (r *Remote) StreamChat(ctx context.Context, messages []Message, handler func(text string, toolCalls []ToolCall)) error {
+func (r *Remote) StreamChat(ctx context.Context, messages []Message, tools []Tool, handler func(text string, toolCalls []ToolCall)) error {
 	slog.Debug("StreamChat request", "model", r.model, "url", r.baseURL, "messageCount", len(messages))
 
 	body, err := json.Marshal(map[string]any{
 		"model":    r.model,
 		"messages": messages,
 		"stream":   true,
+		"tools":    tools,
 	})
 	if err != nil {
 		return err

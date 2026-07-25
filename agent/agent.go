@@ -2,17 +2,26 @@ package agent
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"text/template"
+	"time"
 
 	"github.com/rmyers/majordomo/llm"
 	"github.com/rmyers/majordomo/repo"
 	"github.com/rmyers/majordomo/session"
 )
+
+//go:embed system-prompt.md docs/*
+var fileSystem embed.FS
+
+const docsPrefix = "majordomo-docs/"
 
 const maxQueueSize = 100
 const maxConcurrentSessions = 2
@@ -283,7 +292,7 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 		// For iterations with tool calls, use blocking Chat.
 		if iteration == 1 {
 			// First iteration: check if LLM wants tool calls using blocking Chat
-			resp, err := client.Chat(ctx, allMessages)
+			resp, err := client.Chat(ctx, allMessages, a.Tools)
 			if err != nil {
 				slog.Error("LLM call failed", "iteration", iteration, "error", err)
 				return nil, fmt.Errorf("LLM call: %w", err)
@@ -345,7 +354,7 @@ func (a *Agent) streamFinalResponse(ctx context.Context, sess *session.Session, 
 	client := a.Manager.Get()
 	var accumulatedText string
 
-	err := client.StreamChat(ctx, messages, func(text string, toolCalls []llm.ToolCall) {
+	err := client.StreamChat(ctx, messages, a.Tools, func(text string, toolCalls []llm.ToolCall) {
 		if text != "" {
 			accumulatedText += text
 			select {
@@ -405,6 +414,15 @@ func (a *Agent) toolRead(args map[string]any) ToolResult {
 	path, ok := args["path"].(string)
 	if !ok || path == "" {
 		return ToolResult{Output: "error: 'path' argument is required"}
+	}
+
+	if strings.HasPrefix(path, docsPrefix) {
+		docPath := strings.TrimPrefix(path, docsPrefix)
+		content, err := fileSystem.ReadFile("docs/" + docPath)
+		if err != nil {
+			return ToolResult{Output: "", Err: fmt.Sprintf("read %s: %v", path, err)}
+		}
+		return ToolResult{Output: string(content)}
 	}
 
 	content, err := repo.ReadFile(".", path)
@@ -474,4 +492,29 @@ func parseToolArgs(argsJSON string) (map[string]any, error) {
 		return nil, fmt.Errorf("parsing tool arguments: %w", err)
 	}
 	return args, nil
+}
+
+// ReadEmbedded reads a file from the embedded filesystem (system-prompt.md, docs/*).
+func ReadEmbedded(path string) ([]byte, error) {
+	return fileSystem.ReadFile(path)
+}
+
+// SystemPrompt renders the system-prompt.md template with the current date and working directory.
+func SystemPrompt() string {
+	cwd, _ := os.Getwd()
+	data := map[string]string{
+		"Date": time.Now().Format(time.DateOnly),
+		"Cwd":  cwd,
+	}
+	tmpl, err := template.New("system-prompt").ParseFS(fileSystem, "system-prompt.md")
+	if err != nil {
+		raw, _ := fileSystem.ReadFile("system-prompt.md")
+		return string(raw)
+	}
+	var buf strings.Builder
+	if err := tmpl.ExecuteTemplate(&buf, "system-prompt.md", data); err != nil {
+		raw, _ := fileSystem.ReadFile("system-prompt.md")
+		return string(raw)
+	}
+	return buf.String()
 }

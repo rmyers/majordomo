@@ -381,7 +381,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	sess.RecordMessage("user", query, nil, "")
 
+	prompt := agent.SystemPrompt()
 	messages := []llm.Message{
+		{Role: "system", Content: prompt},
 		{Role: "user", Content: query},
 	}
 
