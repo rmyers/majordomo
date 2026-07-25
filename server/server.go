@@ -28,7 +28,7 @@ type Server struct {
 	cfg        *config.Config
 	sessionSrv *session.SessionService
 	llmManager *llm.Manager
-	mux        *http.ServeMux
+	Router     *http.ServeMux
 	agent      *agent.Agent
 }
 
@@ -39,7 +39,7 @@ func New(config *config.Config, sessionSrv *session.SessionService, agent *agent
 		sessionSrv: sessionSrv,
 		agent:      agent,
 		llmManager: llmManager,
-		mux:        mux,
+		Router:     mux,
 	}
 	server.loadRouter()
 
@@ -53,30 +53,30 @@ func (s *Server) addr() string {
 // Run starts the HTTP server.
 func (s *Server) Run() error {
 	slog.Info("server starting", "addr", s.addr())
-	return http.ListenAndServe(s.addr(), s.mux)
+	return http.ListenAndServe(s.addr(), s.Router)
 }
 
 func (s *Server) loadRouter() {
 	// Serve static assets
-	s.mux.Handle("/styles.css", http.FileServer(http.FS(webFS)))
-	s.mux.Handle("/app.js", http.FileServer(http.FS(webFS)))
+	s.Router.Handle("/styles.css", http.FileServer(http.FS(webFS)))
+	s.Router.Handle("/app.js", http.FileServer(http.FS(webFS)))
 
 	// Settings page.
-	s.mux.HandleFunc("GET /settings", s.handleGetSettings)
-	s.mux.HandleFunc("POST /settings", s.handlePostSettings)
+	s.Router.HandleFunc("GET /settings", s.handleGetSettings)
+	s.Router.HandleFunc("POST /settings", s.handlePostSettings)
 
 	// Session endpoints
-	s.mux.HandleFunc("GET /api/sessions", s.handleListSessions)
-	s.mux.HandleFunc("POST /api/sessions", s.handleCreateSession)
+	s.Router.HandleFunc("GET /api/sessions", s.handleListSessions)
+	s.Router.HandleFunc("POST /api/sessions", s.handleCreateSession)
 
 	// Session history endpoint: GET /api/sessions/{id}/history.
-	s.mux.HandleFunc("GET /api/sessions/{id}/history", s.handleSessionHistory)
+	s.Router.HandleFunc("GET /api/sessions/{id}/history", s.handleSessionHistory)
 
 	// Chat page: serves the web UI with a specific session.
 	// Route: /chat/{id} → serve web UI with the specified session.
-	s.mux.HandleFunc("/chat/{id}", s.handleChat)
-	s.mux.HandleFunc("/api/stream", s.handleStream)
-	s.mux.HandleFunc("/", s.handleRoot)
+	s.Router.HandleFunc("/chat/{id}", s.handleChat)
+	s.Router.HandleFunc("/api/stream", s.handleStream)
+	s.Router.HandleFunc("/", s.handleRoot)
 }
 
 // getConfig returns the current config (read lock).
