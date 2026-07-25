@@ -44,9 +44,10 @@ type WorkItem struct {
 
 // ResultEvent is sent back through a WorkItem's Results channel.
 type ResultEvent struct {
-	Type    string // "status", "message", "chunk", "tool", "error", "done"
+	Type    string // "status", "message", "chunk", "tool", "tool_result", "error", "done"
 	Content string
 	Tool    string
+	Output  string
 	Error   string
 	Turn    int
 }
@@ -205,6 +206,13 @@ func (a *Agent) processWorkItem(item WorkItem) {
 					return
 				}
 			}
+			for _, tc := range msg.ToolCalls {
+				select {
+				case item.Results <- ResultEvent{Type: "tool_result", Tool: tc.Function.Name, Output: tc.Function.Arguments}:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
 	}
 
@@ -326,9 +334,13 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 
 					sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
 
+					content := result.Output
+					if result.Err != "" {
+						content = result.Err
+					}
 					allMessages = append(allMessages, llm.Message{
 						Role:       "tool",
-						Content:    result.Output,
+						Content:    content,
 						ToolCallID: tc.ID,
 					})
 				}

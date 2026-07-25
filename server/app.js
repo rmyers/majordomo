@@ -121,9 +121,59 @@ function initializeChatView() {
 
     source.addEventListener('tool', (e) => {
       const data = JSON.parse(e.data);
+      let responseEl = document.getElementById(`response-${thisTurn}`);
+      if (!responseEl) return;
+      responseEl.classList.remove('typing');
+
+      const toolSection = document.createElement('div');
+      toolSection.className = 'tool-section';
+      toolSection.setAttribute('data-tool', data.name);
+
+      const toolHeader = document.createElement('div');
+      toolHeader.className = 'tool-header';
+      toolHeader.innerHTML = `<span class="arrow">▶</span> ${data.name}`;
+
+      const toolBody = document.createElement('div');
+      toolBody.className = 'tool-body';
+      toolBody.textContent = 'running...';
+
+      toolHeader.addEventListener('click', () => {
+        const arrow = toolHeader.querySelector('.arrow');
+        const isOpen = toolBody.classList.toggle('open');
+        arrow.classList.toggle('open', isOpen);
+      });
+
+      toolSection.appendChild(toolHeader);
+      toolSection.appendChild(toolBody);
+      responseEl.appendChild(toolSection);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
+
+    source.addEventListener('tool_result', (e) => {
+      const data = JSON.parse(e.data);
       const responseEl = document.getElementById(`response-${thisTurn}`);
       if (!responseEl) return;
-      responseEl.classList.add('typing');
+
+      const toolSection = responseEl.querySelector(`.tool-section[data-tool="${data.name}"]`);
+      if (!toolSection) return;
+
+      const toolBody = toolSection.querySelector('.tool-body');
+      const arrow = toolSection.querySelector('.arrow');
+
+      if (data.output === 'running...') {
+        toolBody.textContent = 'running...';
+      } else if (data.output.includes('error:') || data.output.startsWith('read ') || data.output.startsWith('write ') || data.output.includes('command failed') || data.output.includes('no change:')) {
+        toolBody.className = 'tool-body error open';
+        toolBody.textContent = data.output;
+        arrow.textContent = '▶';
+        arrow.classList.remove('open');
+      } else {
+        toolBody.className = 'tool-body open';
+        toolBody.textContent = data.output;
+        arrow.textContent = '▶';
+        arrow.classList.remove('open');
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
     });
 
     source.addEventListener('done', (e) => {

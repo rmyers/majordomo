@@ -458,7 +458,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	accumulated := make(map[string]string)
 
 	// Relay agent results to SSE stream
-	go func() {
+		go func() {
 		defer cancel()
 		for event := range resultsCh {
 			switch event.Type {
@@ -476,6 +476,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				s.sendEventHTML(w, "error", "<span class='error'>"+RenderMarkdown(event.Error)+"</span>")
 			case "tool":
 				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
+			case "tool_result":
+				s.sendEventJSON(w, "tool_result", map[string]string{"name": event.Tool, "output": event.Output, "session": sessionID})
 			case "done":
 				delete(accumulated, sessionID)
 				s.sendDone(w)
