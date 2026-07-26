@@ -229,29 +229,13 @@ func (a *Agent) processWorkItem(item WorkItem) {
 		return
 	}
 
-	// Send each result message
+	// Send the final response message (tool/tool_result events already emitted during streaming)
 	for i, msg := range results {
 		if msg.Content != "" {
 			select {
 			case item.Results <- ResultEvent{Type: "message", Content: msg.Content, Turn: i + 1}:
 			case <-ctx.Done():
 				return
-			}
-		}
-		if len(msg.ToolCalls) > 0 {
-			for _, tc := range msg.ToolCalls {
-				select {
-				case item.Results <- ResultEvent{Type: "tool", Tool: tc.Function.Name}:
-				case <-ctx.Done():
-					return
-				}
-			}
-			for _, tc := range msg.ToolCalls {
-				select {
-				case item.Results <- ResultEvent{Type: "tool_result", Tool: tc.Function.Name, Output: tc.Function.Arguments}:
-				case <-ctx.Done():
-					return
-				}
 			}
 		}
 	}
@@ -352,6 +336,16 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 
 			for _, tc := range resp.ToolCalls {
 				slog.Debug("executing tool", "iteration", iteration, "toolName", tc.Function.Name, "callID", tc.ID)
+
+				// Emit tool event so the SSE relay streams it to the client in real-time.
+				if results != nil {
+					select {
+					case results <- ResultEvent{Type: "tool", Tool: tc.Function.Name}:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+
 				args, err := parseToolArgs(tc.Function.Arguments)
 				if err != nil {
 					slog.Error("failed to parse tool arguments", "iteration", iteration, "toolName", tc.Function.Name, "error", err)
@@ -360,6 +354,13 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 						Content:    fmt.Sprintf("Error parsing arguments: %v", err),
 						ToolCallID: tc.ID,
 					})
+					if results != nil {
+						select {
+						case results <- ResultEvent{Type: "tool_result", Tool: tc.Function.Name, Output: fmt.Sprintf("Error parsing arguments: %v", err)}:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+					}
 					continue
 				}
 
@@ -381,6 +382,15 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 					Content:    content,
 					ToolCallID: tc.ID,
 				})
+
+				// Emit tool_result event so the SSE relay streams the result to the client.
+				if results != nil {
+					select {
+					case results <- ResultEvent{Type: "tool_result", Tool: tc.Function.Name, Output: result.Output, Error: result.Err}:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
 			}
 			continue
 		}
