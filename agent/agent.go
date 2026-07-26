@@ -336,66 +336,6 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 
 		client := a.Manager.Get()
 
-		// For the final response (no tool calls from previous iterations), always use streaming.
-		// For iterations with tool calls, use blocking Chat.
-		if iteration == 1 {
-			// First iteration: check if LLM wants tool calls using blocking Chat
-			resp, err := client.Chat(ctx, allMessages, a.Tools)
-			if err != nil {
-				slog.Error("LLM call failed", "iteration", iteration, "error", err)
-				return nil, fmt.Errorf("LLM call: %w", err)
-			}
-
-			// If the response has tool calls, record the assistant message (only if it has content)
-			// and execute them. The final response will be recorded by streamFinalResponse.
-			if len(resp.ToolCalls) > 0 {
-				if resp.Content != "" {
-					sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
-				}
-				slog.Debug("LLM requested tool calls", "iteration", iteration, "toolCount", len(resp.ToolCalls))
-				allMessages = append(allMessages, *resp)
-
-				for _, tc := range resp.ToolCalls {
-					slog.Debug("executing tool", "iteration", iteration, "toolName", tc.Function.Name, "callID", tc.ID)
-					args, err := parseToolArgs(tc.Function.Arguments)
-					if err != nil {
-						slog.Error("failed to parse tool arguments", "iteration", iteration, "toolName", tc.Function.Name, "error", err)
-						allMessages = append(allMessages, llm.Message{
-							Role:       "tool",
-							Content:    fmt.Sprintf("Error parsing arguments: %v", err),
-							ToolCallID: tc.ID,
-						})
-						continue
-					}
-
-					result := a.executeTool(tc.Function.Name, args)
-					if result.Err != "" {
-						slog.Warn("tool execution returned error", "iteration", iteration, "toolName", tc.Function.Name, "error", result.Err)
-					} else {
-						slog.Debug("tool executed successfully", "iteration", iteration, "toolName", tc.Function.Name, "outputLen", len(result.Output))
-					}
-
-					sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
-
-					content := result.Output
-					if result.Err != "" {
-						content = result.Err
-					}
-					allMessages = append(allMessages, llm.Message{
-						Role:       "tool",
-						Content:    content,
-						ToolCallID: tc.ID,
-					})
-				}
-				// Continue the loop — the next iteration will call the LLM with tool results
-				continue
-			}
-
-			// No tool calls — this is the final response, stream it directly
-			slog.Debug("agent loop complete — final response (no tools, streaming)", "iteration", iteration, "contentLen", len(resp.Content))
-			return a.streamFinalResponse(ctx, sess, allMessages, results)
-		}
-
 		// Subsequent iterations: call the LLM with all messages including tool results
 		resp, err := client.Chat(ctx, allMessages, a.Tools)
 		if err != nil {
