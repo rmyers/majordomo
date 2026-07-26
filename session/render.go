@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"html/template"
+	"log/slog"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -108,6 +109,7 @@ func RenderChatEvents(events []Event, toolList []ToolInfo) []ChatEvent {
 						break
 					}
 				}
+				slog.Info("Tool summary", "summary", summary)
 				if summary == "" {
 					summary = tc.Name
 				}

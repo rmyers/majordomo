@@ -219,7 +219,7 @@ func (s *Server) renderSettingsPage(w http.ResponseWriter, r *http.Request, succ
 		Provider:  provider,
 		Model:     model,
 		URL:       url,
-		APIKey:    "",
+		APIKey:    apiKey,
 		Host:      host,
 		Port:      port,
 		Success:   success,
@@ -228,6 +228,7 @@ func (s *Server) renderSettingsPage(w http.ResponseWriter, r *http.Request, succ
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Settings(w, data); err != nil {
+		slog.Error("settings page error", "error", err, "url", r.URL)
 		http.Error(w, "Error rendering settings", http.StatusInternalServerError)
 		return
 	}
@@ -246,8 +247,15 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	slog.Info("creating new session")
+	if err := r.ParseForm(); err != nil {
+		slog.Error("failed to parse form", "error", err)
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	prompt := strings.TrimSpace(r.Form.Get("prompt"))
+
 	// Query is handled by handleStream, not here
-	sess, err := s.sessionSrv.CreateSession("")
+	sess, err := s.sessionSrv.CreateSession(prompt)
 	if err != nil {
 		slog.Error("failed to create session", "error", err)
 		http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
@@ -466,9 +474,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			case "error":
 				s.sendEventHTML(w, "error", "<span class='error'>"+session.RenderMarkdown(event.Error)+"</span>")
 			case "tool":
-				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
+				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID, "html": session.RenderMarkdown("running...")})
 			case "tool_result":
-				s.sendEventJSON(w, "tool_result", map[string]string{"name": event.Tool, "output": event.Output, "session": sessionID})
+				s.sendEventJSON(w, "tool_result", map[string]string{"name": event.Tool, "output": event.Output, "session": sessionID, "html": session.RenderMarkdown(event.Output)})
 			case "done":
 				delete(accumulated, sessionID)
 				s.sendDone(w)

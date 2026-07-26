@@ -4,10 +4,13 @@
     <h2>Welcome to Majordomo</h2>
     <p>Start a new conversation or select an existing session from the sidebar.</p>
 
-    <div id="input-area">
-      <textarea id="input" placeholder="Ask me anything..." rows="3" autofocus></textarea>
-      <button id="send-btn">Send</button>
-    </div>
+    <form method="POST" action="/api/session">
+
+      <div id="input-area">
+        <textarea id="input" name="prompt" placeholder="Ask me anything..." rows="3" autofocus></textarea>
+        <button id="send-btn" type="submit">Send</button>
+      </div>
+    </form>
   </div>
 </div>
 {{end}}

@@ -11,6 +11,16 @@ Use the `Makefile` at the project root:
 | `make test`   | Run all tests (`go test ./...`) |
 | `make help`   | Show available commands |
 
+### Examples
+
+```bash
+# Run with custom port and config
+make dev args="--port :18080 --config ./my-config.json"
+
+# Build binary
+make build
+```
+
 ## Project Structure
 
 | Directory   | Purpose                              |

@@ -157,6 +157,8 @@ function initializeChatView() {
       if (existingTool) return;
 
       const toolSection = createToolSection(data.name, 'running...', false);
+      const toolBody = toolSection.querySelector('.tool-body');
+      if (data.html) toolBody.innerHTML = decodeSSENewlines(data.html);
       responseEl.appendChild(toolSection);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     });
@@ -174,14 +176,18 @@ function initializeChatView() {
 
       const isErr = data.output !== 'running...' && (data.output.includes('error:') || data.output.startsWith('read ') || data.output.startsWith('write ') || data.output.includes('command failed') || data.output.includes('no change:'));
 
+      if (data.html) {
+        toolBody.innerHTML = decodeSSENewlines(data.html);
+      } else {
+        toolBody.textContent = data.output;
+      }
+
       if (isErr) {
         toolBody.className = 'tool-body error open';
-        toolBody.textContent = data.output;
         arrow.textContent = '▶';
         arrow.classList.remove('open');
       } else {
         toolBody.className = 'tool-body open';
-        toolBody.textContent = data.output;
         arrow.textContent = '▶';
         arrow.classList.remove('open');
       }
