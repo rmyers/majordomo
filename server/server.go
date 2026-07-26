@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
@@ -275,23 +274,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sess.Close()
 
-	var messages []session.Message
 	events, err := s.sessionSrv.SessionHistory(sessionID)
 	if err != nil {
-		slog.Error("failed to list sessions", "error", err)
-		http.Error(w, "Sessions events missing", http.StatusInternalServerError)
+		slog.Error("failed to load session history", "sessionID", sessionID, "error", err)
+		http.Error(w, "failed to load session history", http.StatusInternalServerError)
 		return
-	}
-
-	for _, ev := range events {
-		if ev.Type == "message" && ev.Message != nil {
-			var msg session.Message
-			if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
-				if (msg.Role == "user" || msg.Role == "assistant") && msg.Content != "" {
-					messages = append(messages, msg)
-				}
-			}
-		}
 	}
 
 	summaries, err := s.sessionSrv.ListSessions()
@@ -301,13 +288,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	renderedMessages := make([]templates.ChatMessage, len(messages))
-	for i, msg := range messages {
-		renderedMessages[i] = templates.ChatMessage{
-			Role:    msg.Role,
-			Content: template.HTML(RenderMarkdown(msg.Content)),
-		}
+	// Convert agent tools to template tool info.
+	toolList := make([]session.ToolInfo, 0, len(s.agent.Tools))
+	for _, t := range s.agent.Tools {
+		toolList = append(toolList, session.ToolInfo{
+			Name:    t.Name,
+			Summary: t.Summary,
+		})
 	}
+
+	renderedMessages := session.RenderChatEvents(events, toolList)
+
 	data := templates.ChatParams{
 		Sessions:  summaries,
 		SessionID: sessionID,
@@ -316,7 +307,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Chat(w, data); err != nil {
-		http.Error(w, "Error rendering home", http.StatusBadRequest)
+		http.Error(w, "Error rendering chat", http.StatusBadRequest)
 		return
 	}
 }
@@ -458,7 +449,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	accumulated := make(map[string]string)
 
 	// Relay agent results to SSE stream
-		go func() {
+	go func() {
 		defer cancel()
 		for event := range resultsCh {
 			switch event.Type {
@@ -466,14 +457,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				s.sendEventJSON(w, "status", map[string]string{"status": "thinking", "session": sessionID})
 			case "chunk":
 				accumulated[sessionID] += event.Content
-				html := RenderMarkdown(accumulated[sessionID])
+				html := session.RenderMarkdown(accumulated[sessionID])
 				s.sendEventHTML(w, "message", html)
 			case "message":
 				accumulated[sessionID] = event.Content
-				html := RenderMarkdown(accumulated[sessionID])
+				html := session.RenderMarkdown(accumulated[sessionID])
 				s.sendEventHTML(w, "message", html)
 			case "error":
-				s.sendEventHTML(w, "error", "<span class='error'>"+RenderMarkdown(event.Error)+"</span>")
+				s.sendEventHTML(w, "error", "<span class='error'>"+session.RenderMarkdown(event.Error)+"</span>")
 			case "tool":
 				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
 			case "tool_result":

@@ -81,6 +81,15 @@ func New(manager *llm.Manager) *Agent {
 				Params: map[string]llm.ParamSchema{
 					"path": {Type: "string", Description: "The file path to read", Required: true},
 				},
+				Summary: func(args string) string {
+					var m map[string]any
+					if err := json.Unmarshal([]byte(args), &m); err == nil {
+						if p, ok := m["path"].(string); ok {
+							return "read " + p
+						}
+					}
+					return "read"
+				},
 			},
 			{
 				Name:        "edit",
@@ -90,6 +99,15 @@ func New(manager *llm.Manager) *Agent {
 					"oldText": {Type: "string", Description: "The exact text to find and replace", Required: true},
 					"newText": {Type: "string", Description: "The text to replace with", Required: true},
 				},
+				Summary: func(args string) string {
+					var m map[string]any
+					if err := json.Unmarshal([]byte(args), &m); err == nil {
+						if p, ok := m["path"].(string); ok {
+							return "edit " + p
+						}
+					}
+					return "edit"
+				},
 			},
 			{
 				Name:        "write",
@@ -98,12 +116,34 @@ func New(manager *llm.Manager) *Agent {
 					"path":    {Type: "string", Description: "The file path to write", Required: true},
 					"content": {Type: "string", Description: "The content to write", Required: true},
 				},
+				Summary: func(args string) string {
+					var m map[string]any
+					if err := json.Unmarshal([]byte(args), &m); err == nil {
+						if p, ok := m["path"].(string); ok {
+							return "write " + p
+						}
+					}
+					return "write"
+				},
 			},
 			{
 				Name:        "bash",
 				Description: "Execute a shell command and return its output. Use this for running scripts, installing packages, or any command-line task.",
 				Params: map[string]llm.ParamSchema{
 					"cmd": {Type: "string", Description: "The shell command to execute", Required: true},
+				},
+				Summary: func(args string) string {
+					var m map[string]any
+					if err := json.Unmarshal([]byte(args), &m); err == nil {
+						if c, ok := m["cmd"].(string); ok {
+							cmd := strings.TrimSpace(c)
+							if len(cmd) > 50 {
+								cmd = cmd[:50] + "…"
+							}
+							return "bash: " + cmd
+						}
+					}
+					return "bash"
 				},
 			},
 		},
@@ -306,9 +346,12 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 				return nil, fmt.Errorf("LLM call: %w", err)
 			}
 
-			// If the response has tool calls, record the assistant message and execute them
+			// If the response has tool calls, record the assistant message (only if it has content)
+			// and execute them. The final response will be recorded by streamFinalResponse.
 			if len(resp.ToolCalls) > 0 {
-				sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
+				if resp.Content != "" {
+					sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
+				}
 				slog.Debug("LLM requested tool calls", "iteration", iteration, "toolCount", len(resp.ToolCalls))
 				allMessages = append(allMessages, *resp)
 

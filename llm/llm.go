@@ -84,6 +84,7 @@ type Tool struct {
 	Name        string
 	Description string
 	Params      map[string]ParamSchema
+	Summary     func(args string) string
 }
 
 // ParamSchema describes a single parameter for a tool.

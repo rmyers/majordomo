@@ -62,6 +62,38 @@ function initializeChatView() {
     statusText.textContent = text;
   }
 
+
+  function createToolSection(name, result, isErr) {
+    const toolSection = document.createElement('div');
+    toolSection.className = 'tool-section';
+    toolSection.setAttribute('data-tool', name);
+
+    const toolHeader = document.createElement('div');
+    toolHeader.className = 'tool-header';
+    toolHeader.innerHTML = `<span class="arrow">▶</span> ${name}`;
+
+    const toolBody = document.createElement('div');
+    toolBody.className = 'tool-body' + (isErr ? ' error' : '');
+    if (isErr || result === 'running...') {
+      toolBody.classList.add('open');
+    }
+    toolBody.textContent = result === 'running...' ? 'running...' : result;
+
+    toolHeader.addEventListener('click', () => {
+      const arrow = toolHeader.querySelector('.arrow');
+      const isOpen = toolBody.classList.toggle('open');
+      arrow.classList.toggle('open', isOpen);
+    });
+
+    toolSection.appendChild(toolHeader);
+    toolSection.appendChild(toolBody);
+    return toolSection;
+  }
+
+  function decodeSSENewlines(html) {
+    return html.replace(/\\n/g, '<br>');
+  }
+
   function sendMessage() {
     const query = inputEl.value.trim();
     if (!query) return;
@@ -90,10 +122,6 @@ function initializeChatView() {
     const url = `/api/stream?query=${encodeURIComponent(query)}&session=${sessionId}`;
     const source = new EventSource(url);
 
-    function decodeSSENewlines(html) {
-      return html.replace(/\\n/g, '<br>');
-    }
-
     source.addEventListener('session', (e) => {
       setStatus('connected', 'thinking...');
     });
@@ -121,30 +149,14 @@ function initializeChatView() {
 
     source.addEventListener('tool', (e) => {
       const data = JSON.parse(e.data);
-      let responseEl = document.getElementById(`response-${thisTurn}`);
+      const responseEl = document.getElementById(`response-${thisTurn}`);
       if (!responseEl) return;
       responseEl.classList.remove('typing');
 
-      const toolSection = document.createElement('div');
-      toolSection.className = 'tool-section';
-      toolSection.setAttribute('data-tool', data.name);
+      const existingTool = responseEl.querySelector(`.tool-section[data-tool="${data.name}"]`);
+      if (existingTool) return;
 
-      const toolHeader = document.createElement('div');
-      toolHeader.className = 'tool-header';
-      toolHeader.innerHTML = `<span class="arrow">▶</span> ${data.name}`;
-
-      const toolBody = document.createElement('div');
-      toolBody.className = 'tool-body';
-      toolBody.textContent = 'running...';
-
-      toolHeader.addEventListener('click', () => {
-        const arrow = toolHeader.querySelector('.arrow');
-        const isOpen = toolBody.classList.toggle('open');
-        arrow.classList.toggle('open', isOpen);
-      });
-
-      toolSection.appendChild(toolHeader);
-      toolSection.appendChild(toolBody);
+      const toolSection = createToolSection(data.name, 'running...', false);
       responseEl.appendChild(toolSection);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     });
@@ -160,9 +172,9 @@ function initializeChatView() {
       const toolBody = toolSection.querySelector('.tool-body');
       const arrow = toolSection.querySelector('.arrow');
 
-      if (data.output === 'running...') {
-        toolBody.textContent = 'running...';
-      } else if (data.output.includes('error:') || data.output.startsWith('read ') || data.output.startsWith('write ') || data.output.includes('command failed') || data.output.includes('no change:')) {
+      const isErr = data.output !== 'running...' && (data.output.includes('error:') || data.output.startsWith('read ') || data.output.startsWith('write ') || data.output.includes('command failed') || data.output.includes('no change:'));
+
+      if (isErr) {
         toolBody.className = 'tool-body error open';
         toolBody.textContent = data.output;
         arrow.textContent = '▶';
@@ -178,6 +190,10 @@ function initializeChatView() {
 
     source.addEventListener('done', (e) => {
       source.close();
+      const responseEl = document.getElementById(`response-${thisTurn}`);
+      if (responseEl && responseEl.textContent.trim() === '' && !responseEl.querySelector('.tool-section')) {
+        responseEl.remove();
+      }
       sendBtn.disabled = false;
       setStatus('', 'disconnected');
     });

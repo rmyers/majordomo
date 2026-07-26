@@ -84,7 +84,7 @@ func TestChat(t *testing.T) {
 	params := ChatParams{
 		Sessions:  []session.Summary{},
 		SessionID: "test-session-1",
-		Messages:  []ChatMessage{},
+		Messages:  []session.ChatEvent{},
 	}
 	err := Chat(&buf, params)
 	if err != nil {
@@ -105,7 +105,7 @@ func TestChat(t *testing.T) {
 
 func TestChatWithMessages(t *testing.T) {
 	var buf strings.Builder
-	messages := []ChatMessage{
+	messages := []session.ChatEvent{
 		{Role: "user", Content: "Hello, world!"},
 		{Role: "assistant", Content: "Hi there! How can I help?"},
 	}
@@ -139,7 +139,7 @@ func TestChatEmptyMessages(t *testing.T) {
 	params := ChatParams{
 		Sessions:  []session.Summary{},
 		SessionID: "session-xyz",
-		Messages:  []ChatMessage{},
+		Messages:  []session.ChatEvent{},
 	}
 	err := Chat(&buf, params)
 	if err != nil {
