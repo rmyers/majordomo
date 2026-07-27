@@ -63,38 +63,6 @@ function initializeChatView() {
     statusText.textContent = text;
   }
 
-
-  function createToolSection(name, result, isErr) {
-    const toolSection = document.createElement('div');
-    toolSection.className = 'tool-section';
-    toolSection.setAttribute('data-tool', name);
-
-    const toolHeader = document.createElement('div');
-    toolHeader.className = 'tool-header';
-    toolHeader.innerHTML = `<span class="arrow">▶</span> ${name}`;
-
-    const toolBody = document.createElement('div');
-    toolBody.className = 'tool-body' + (isErr ? ' error' : '');
-    if (isErr || result === 'running...') {
-      toolBody.classList.add('open');
-    }
-    toolBody.textContent = result === 'running...' ? 'running...' : result;
-
-    toolHeader.addEventListener('click', () => {
-      const arrow = toolHeader.querySelector('.arrow');
-      const isOpen = toolBody.classList.toggle('open');
-      arrow.classList.toggle('open', isOpen);
-    });
-
-    toolSection.appendChild(toolHeader);
-    toolSection.appendChild(toolBody);
-    return toolSection;
-  }
-
-  function decodeSSENewlines(html) {
-    return html.replace(/\\n/g, '<br>');
-  }
-
   function sendMessage() {
     const query = inputEl.value.trim();
     if (!query) return;
