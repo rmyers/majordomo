@@ -6,14 +6,23 @@ import (
 	"io"
 
 	"github.com/rmyers/majordomo/session"
+	"github.com/yuin/goldmark"
+	goldmarkHTML "github.com/yuin/goldmark/extension"
+)
+
+var md = goldmark.New(
+	goldmark.WithExtensions(
+		goldmarkHTML.Table,
+		goldmarkHTML.Strikethrough,
+	),
 )
 
 //go:embed *
 var files embed.FS
 
 var (
-	home   = parse("home.html")
-	chat   = parse("chat.html")
+	home     = parse("home.html")
+	chat     = parse("chat.html")
 	settings = parse("settings.html")
 )
 
@@ -29,12 +38,15 @@ func Home(w io.Writer, p HomeParams) error {
 type ChatParams struct {
 	Sessions  []session.Summary
 	SessionID string
-	Messages  []ChatMessage
+	Messages  []session.ChatEvent
 }
 
-type ChatMessage struct {
-	Role    string
-	Content template.HTML
+type ToolSection struct {
+	ID     string
+	Name   string
+	Args   string
+	Result string
+	IsErr  bool
 }
 
 func Chat(w io.Writer, p ChatParams) error {

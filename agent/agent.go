@@ -2,17 +2,26 @@ package agent
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"text/template"
+	"time"
 
 	"github.com/rmyers/majordomo/llm"
 	"github.com/rmyers/majordomo/repo"
 	"github.com/rmyers/majordomo/session"
 )
+
+//go:embed system-prompt.md docs/*
+var fileSystem embed.FS
+
+const docsPrefix = "majordomo-docs/"
 
 const maxQueueSize = 100
 const maxConcurrentSessions = 2
@@ -35,9 +44,12 @@ type WorkItem struct {
 
 // ResultEvent is sent back through a WorkItem's Results channel.
 type ResultEvent struct {
-	Type    string // "status", "message", "chunk", "tool", "error", "done"
+	Type    string // "status", "message", "chunk", "tool", "tool_result", "error", "done"
 	Content string
 	Tool    string
+	CallID  string
+	Args    string
+	Output  string
 	Error   string
 	Turn    int
 }
@@ -71,6 +83,15 @@ func New(manager *llm.Manager) *Agent {
 				Params: map[string]llm.ParamSchema{
 					"path": {Type: "string", Description: "The file path to read", Required: true},
 				},
+				Summary: func(args string) string {
+					var m map[string]any
+					if err := json.Unmarshal([]byte(args), &m); err == nil {
+						if p, ok := m["path"].(string); ok {
+							return "read " + p
+						}
+					}
+					return "read"
+				},
 			},
 			{
 				Name:        "edit",
@@ -80,6 +101,15 @@ func New(manager *llm.Manager) *Agent {
 					"oldText": {Type: "string", Description: "The exact text to find and replace", Required: true},
 					"newText": {Type: "string", Description: "The text to replace with", Required: true},
 				},
+				Summary: func(args string) string {
+					var m map[string]any
+					if err := json.Unmarshal([]byte(args), &m); err == nil {
+						if p, ok := m["path"].(string); ok {
+							return "edit " + p
+						}
+					}
+					return "edit"
+				},
 			},
 			{
 				Name:        "write",
@@ -88,12 +118,34 @@ func New(manager *llm.Manager) *Agent {
 					"path":    {Type: "string", Description: "The file path to write", Required: true},
 					"content": {Type: "string", Description: "The content to write", Required: true},
 				},
+				Summary: func(args string) string {
+					var m map[string]any
+					if err := json.Unmarshal([]byte(args), &m); err == nil {
+						if p, ok := m["path"].(string); ok {
+							return "write " + p
+						}
+					}
+					return "write"
+				},
 			},
 			{
 				Name:        "bash",
 				Description: "Execute a shell command and return its output. Use this for running scripts, installing packages, or any command-line task.",
 				Params: map[string]llm.ParamSchema{
 					"cmd": {Type: "string", Description: "The shell command to execute", Required: true},
+				},
+				Summary: func(args string) string {
+					var m map[string]any
+					if err := json.Unmarshal([]byte(args), &m); err == nil {
+						if c, ok := m["cmd"].(string); ok {
+							cmd := strings.TrimSpace(c)
+							if len(cmd) > 50 {
+								cmd = cmd[:50] + "…"
+							}
+							return "bash: " + cmd
+						}
+					}
+					return "bash"
 				},
 			},
 		},
@@ -179,7 +231,7 @@ func (a *Agent) processWorkItem(item WorkItem) {
 		return
 	}
 
-	// Send each result message
+	// Send the final response message (tool/tool_result events already emitted during streaming)
 	for i, msg := range results {
 		if msg.Content != "" {
 			select {
@@ -191,7 +243,7 @@ func (a *Agent) processWorkItem(item WorkItem) {
 		if len(msg.ToolCalls) > 0 {
 			for _, tc := range msg.ToolCalls {
 				select {
-				case item.Results <- ResultEvent{Type: "tool", Tool: tc.Function.Name}:
+				case item.Results <- ResultEvent{Type: "tool", Tool: tc.Function.Name, CallID: tc.ID, Args: tc.Function.Arguments}:
 				case <-ctx.Done():
 					return
 				}
@@ -279,62 +331,82 @@ func (a *Agent) runWithSession(ctx context.Context, sess *session.Session, messa
 
 		client := a.Manager.Get()
 
-		// For the final response (no tool calls from previous iterations), always use streaming.
-		// For iterations with tool calls, use blocking Chat.
-		if iteration == 1 {
-			// First iteration: check if LLM wants tool calls using blocking Chat
-			resp, err := client.Chat(ctx, allMessages)
-			if err != nil {
-				slog.Error("LLM call failed", "iteration", iteration, "error", err)
-				return nil, fmt.Errorf("LLM call: %w", err)
-			}
-
-			// If the response has tool calls, record the assistant message and execute them
-			if len(resp.ToolCalls) > 0 {
-				sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
-				slog.Debug("LLM requested tool calls", "iteration", iteration, "toolCount", len(resp.ToolCalls))
-				allMessages = append(allMessages, *resp)
-
-				for _, tc := range resp.ToolCalls {
-					slog.Debug("executing tool", "iteration", iteration, "toolName", tc.Function.Name, "callID", tc.ID)
-					args, err := parseToolArgs(tc.Function.Arguments)
-					if err != nil {
-						slog.Error("failed to parse tool arguments", "iteration", iteration, "toolName", tc.Function.Name, "error", err)
-						allMessages = append(allMessages, llm.Message{
-							Role:       "tool",
-							Content:    fmt.Sprintf("Error parsing arguments: %v", err),
-							ToolCallID: tc.ID,
-						})
-						continue
-					}
-
-					result := a.executeTool(tc.Function.Name, args)
-					if result.Err != "" {
-						slog.Warn("tool execution returned error", "iteration", iteration, "toolName", tc.Function.Name, "error", result.Err)
-					} else {
-						slog.Debug("tool executed successfully", "iteration", iteration, "toolName", tc.Function.Name, "outputLen", len(result.Output))
-					}
-
-					sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
-
-					allMessages = append(allMessages, llm.Message{
-						Role:       "tool",
-						Content:    result.Output,
-						ToolCallID: tc.ID,
-					})
-				}
-				// After tool calls, stream the final response
-				slog.Debug("tool calls complete — streaming final response", "iteration", iteration+1)
-				return a.streamFinalResponse(ctx, sess, allMessages, results)
-			}
-
-			// No tool calls — this is the final response, stream it directly
-			slog.Debug("agent loop complete — final response (no tools, streaming)", "iteration", iteration, "contentLen", len(resp.Content))
-			return a.streamFinalResponse(ctx, sess, allMessages, results)
+		// Subsequent iterations: call the LLM with all messages including tool results
+		resp, err := client.Chat(ctx, allMessages, a.Tools)
+		if err != nil {
+			slog.Error("LLM call failed", "iteration", iteration, "error", err)
+			return nil, fmt.Errorf("LLM call: %w", err)
 		}
 
-		// Subsequent iterations: stream the final response
-		slog.Debug("agent loop complete — streaming final response", "iteration", iteration)
+		if len(resp.ToolCalls) > 0 {
+			if resp.Content != "" {
+				sess.RecordMessage("assistant", resp.Content, resp.ToolCalls, "")
+			}
+			slog.Debug("LLM requested tool calls", "iteration", iteration, "toolCount", len(resp.ToolCalls))
+			allMessages = append(allMessages, *resp)
+
+			for _, tc := range resp.ToolCalls {
+				slog.Debug("executing tool", "iteration", iteration, "toolName", tc.Function.Name, "callID", tc.ID)
+
+				// Emit tool event so the SSE relay streams it to the client in real-time.
+				if results != nil {
+					select {
+					case results <- ResultEvent{Type: "tool", Tool: tc.Function.Name}:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+
+				args, err := parseToolArgs(tc.Function.Arguments)
+				if err != nil {
+					slog.Error("failed to parse tool arguments", "iteration", iteration, "toolName", tc.Function.Name, "error", err)
+					allMessages = append(allMessages, llm.Message{
+						Role:       "tool",
+						Content:    fmt.Sprintf("Error parsing arguments: %v", err),
+						ToolCallID: tc.ID,
+					})
+					if results != nil {
+						select {
+						case results <- ResultEvent{Type: "tool_result", Tool: tc.Function.Name, Output: fmt.Sprintf("Error parsing arguments: %v", err)}:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+					}
+					continue
+				}
+
+				result := a.executeTool(tc.Function.Name, args)
+				if result.Err != "" {
+					slog.Warn("tool execution returned error", "iteration", iteration, "toolName", tc.Function.Name, "error", result.Err)
+				} else {
+					slog.Debug("tool executed successfully", "iteration", iteration, "toolName", tc.Function.Name, "outputLen", len(result.Output))
+				}
+
+				sess.RecordToolResult(tc.ID, result.Output, result.Err, "")
+
+				content := result.Output
+				if result.Err != "" {
+					content = result.Err
+				}
+				allMessages = append(allMessages, llm.Message{
+					Role:       "tool",
+					Content:    content,
+					ToolCallID: tc.ID,
+				})
+
+				// Emit tool_result event so the SSE relay streams the result to the client.
+				if results != nil {
+					select {
+					case results <- ResultEvent{Type: "tool_result", Tool: tc.Function.Name, Output: result.Output, Error: result.Err}:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+			}
+			continue
+		}
+
+		slog.Debug("agent loop complete — final response (no tools, streaming)", "iteration", iteration, "contentLen", len(resp.Content))
 		return a.streamFinalResponse(ctx, sess, allMessages, results)
 	}
 }
@@ -345,7 +417,7 @@ func (a *Agent) streamFinalResponse(ctx context.Context, sess *session.Session, 
 	client := a.Manager.Get()
 	var accumulatedText string
 
-	err := client.StreamChat(ctx, messages, func(text string, toolCalls []llm.ToolCall) {
+	err := client.StreamChat(ctx, messages, a.Tools, func(text string, toolCalls []llm.ToolCall) {
 		if text != "" {
 			accumulatedText += text
 			select {
@@ -405,6 +477,15 @@ func (a *Agent) toolRead(args map[string]any) ToolResult {
 	path, ok := args["path"].(string)
 	if !ok || path == "" {
 		return ToolResult{Output: "error: 'path' argument is required"}
+	}
+
+	if strings.HasPrefix(path, docsPrefix) {
+		docPath := strings.TrimPrefix(path, docsPrefix)
+		content, err := fileSystem.ReadFile("docs/" + docPath)
+		if err != nil {
+			return ToolResult{Output: "", Err: fmt.Sprintf("read %s: %v", path, err)}
+		}
+		return ToolResult{Output: string(content)}
 	}
 
 	content, err := repo.ReadFile(".", path)
@@ -474,4 +555,29 @@ func parseToolArgs(argsJSON string) (map[string]any, error) {
 		return nil, fmt.Errorf("parsing tool arguments: %w", err)
 	}
 	return args, nil
+}
+
+// ReadEmbedded reads a file from the embedded filesystem (system-prompt.md, docs/*).
+func ReadEmbedded(path string) ([]byte, error) {
+	return fileSystem.ReadFile(path)
+}
+
+// SystemPrompt renders the system-prompt.md template with the current date and working directory.
+func SystemPrompt() string {
+	cwd, _ := os.Getwd()
+	data := map[string]string{
+		"Date": time.Now().Format(time.DateOnly),
+		"Cwd":  cwd,
+	}
+	tmpl, err := template.New("system-prompt").ParseFS(fileSystem, "system-prompt.md")
+	if err != nil {
+		raw, _ := fileSystem.ReadFile("system-prompt.md")
+		return string(raw)
+	}
+	var buf strings.Builder
+	if err := tmpl.ExecuteTemplate(&buf, "system-prompt.md", data); err != nil {
+		raw, _ := fileSystem.ReadFile("system-prompt.md")
+		return string(raw)
+	}
+	return buf.String()
 }

@@ -7,7 +7,11 @@
 
   <div id="messages">
     {{range .Messages}}
-    <div class="message {{.Role}}">{{.Content}}</div>
+    {{if eq .Role "user"}}
+      {{template "userMessage" .}}
+    {{else}}
+      {{template "assistantMessage" .}}
+    {{end}}
     {{else}}
     <!-- No messages yet -->
     {{end}}
@@ -23,4 +27,24 @@
   // Set current session ID for JavaScript
   window.currentSessionId = "{{.SessionID}}";
 </script>
+{{end}}
+
+{{define "userMessage"}}
+<div class="message user">
+  {{.Content}}
+</div>
+{{end}}
+
+{{define "assistantMessage"}}
+<div class="message assistant">
+  {{if .Content}}
+  <div class="content">{{.Content}}</div>
+  {{end}}
+  {{range .Tools}}
+  <details id="tool-{{.ID}}"{{if .IsErr}} open{{end}}>
+    <summary>{{.Args}}</summary>
+    <pre class="tool-result{{if .IsErr}} error{{end}}">{{.Result}}</pre>
+  </details>
+  {{end}}
+</div>
 {{end}}

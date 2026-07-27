@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
@@ -220,7 +219,7 @@ func (s *Server) renderSettingsPage(w http.ResponseWriter, r *http.Request, succ
 		Provider:  provider,
 		Model:     model,
 		URL:       url,
-		APIKey:    "",
+		APIKey:    apiKey,
 		Host:      host,
 		Port:      port,
 		Success:   success,
@@ -229,6 +228,7 @@ func (s *Server) renderSettingsPage(w http.ResponseWriter, r *http.Request, succ
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Settings(w, data); err != nil {
+		slog.Error("settings page error", "error", err, "url", r.URL)
 		http.Error(w, "Error rendering settings", http.StatusInternalServerError)
 		return
 	}
@@ -247,8 +247,15 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	slog.Info("creating new session")
+	if err := r.ParseForm(); err != nil {
+		slog.Error("failed to parse form", "error", err)
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	prompt := strings.TrimSpace(r.Form.Get("prompt"))
+
 	// Query is handled by handleStream, not here
-	sess, err := s.sessionSrv.CreateSession("")
+	sess, err := s.sessionSrv.CreateSession(prompt)
 	if err != nil {
 		slog.Error("failed to create session", "error", err)
 		http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
@@ -275,23 +282,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sess.Close()
 
-	var messages []session.Message
 	events, err := s.sessionSrv.SessionHistory(sessionID)
 	if err != nil {
-		slog.Error("failed to list sessions", "error", err)
-		http.Error(w, "Sessions events missing", http.StatusInternalServerError)
+		slog.Error("failed to load session history", "sessionID", sessionID, "error", err)
+		http.Error(w, "failed to load session history", http.StatusInternalServerError)
 		return
-	}
-
-	for _, ev := range events {
-		if ev.Type == "message" && ev.Message != nil {
-			var msg session.Message
-			if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
-				if (msg.Role == "user" || msg.Role == "assistant") && msg.Content != "" {
-					messages = append(messages, msg)
-				}
-			}
-		}
 	}
 
 	summaries, err := s.sessionSrv.ListSessions()
@@ -301,13 +296,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	renderedMessages := make([]templates.ChatMessage, len(messages))
-	for i, msg := range messages {
-		renderedMessages[i] = templates.ChatMessage{
-			Role:    msg.Role,
-			Content: template.HTML(RenderMarkdown(msg.Content)),
-		}
+	// Convert agent tools to template tool info.
+	toolList := make([]session.ToolInfo, 0, len(s.agent.Tools))
+	for _, t := range s.agent.Tools {
+		toolList = append(toolList, session.ToolInfo{
+			Name:    t.Name,
+			Summary: t.Summary,
+		})
 	}
+
+	renderedMessages := session.RenderChatEvents(events, toolList)
+
 	data := templates.ChatParams{
 		Sessions:  summaries,
 		SessionID: sessionID,
@@ -316,7 +315,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Chat(w, data); err != nil {
-		http.Error(w, "Error rendering home", http.StatusBadRequest)
+		http.Error(w, "Error rendering chat", http.StatusBadRequest)
 		return
 	}
 }
@@ -381,7 +380,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	sess.RecordMessage("user", query, nil, "")
 
+	prompt := agent.SystemPrompt()
 	messages := []llm.Message{
+		{Role: "system", Content: prompt},
 		{Role: "user", Content: query},
 	}
 
@@ -464,16 +465,18 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				s.sendEventJSON(w, "status", map[string]string{"status": "thinking", "session": sessionID})
 			case "chunk":
 				accumulated[sessionID] += event.Content
-				html := RenderMarkdown(accumulated[sessionID])
+				html := session.RenderMarkdown(accumulated[sessionID])
 				s.sendEventHTML(w, "message", html)
 			case "message":
 				accumulated[sessionID] = event.Content
-				html := RenderMarkdown(accumulated[sessionID])
+				html := session.RenderMarkdown(accumulated[sessionID])
 				s.sendEventHTML(w, "message", html)
 			case "error":
-				s.sendEventHTML(w, "error", "<span class='error'>"+RenderMarkdown(event.Error)+"</span>")
+				s.sendEventHTML(w, "error", "<span class='error'>"+session.RenderMarkdown(event.Error)+"</span>")
 			case "tool":
-				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID})
+				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "callId": event.CallID, "args": event.Args, "output": "running...", "session": sessionID})
+			case "tool_result":
+				s.sendEventJSON(w, "tool_result", map[string]string{"callId": event.CallID, "output": event.Output, "error": event.Error, "session": sessionID})
 			case "done":
 				delete(accumulated, sessionID)
 				s.sendDone(w)

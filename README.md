@@ -9,7 +9,7 @@ Majordomo is a local-first AI agent with a web interface. It can read files, edi
 3. Clone and run:
 
 ```bash
-go run ./cmd/majordomo
+make dev
 ```
 
 The server starts on `http://localhost:3636`. Open that URL in your browser.
@@ -26,6 +26,8 @@ Click the gear icon (settings) in the header to configure your LLM:
 - **API Key** — Optional bearer token for authenticated servers
 
 Settings are persisted to `~/.majordomo/config.json`.
+
+**Note:** Ensure the `~/.majordomo/` directory exists before placing the config file.
 
 ### CLI (file-based)
 
@@ -51,15 +53,29 @@ Majordomo can use four tools:
 - **write** — Write or overwrite a file
 - **bash** — Execute shell commands
 
+## Examples
+
+- "Read the contents of `config.json`"
+- "Create a new file `notes.md` with the following text: ..."
+- "Run `ls -la` in the current directory"
+
 ## Commands
+
+A `Makefile` is included to simplify common tasks.
 
 ```bash
 # Run the web server (default port 3636)
-go run ./cmd/majordomo
+make dev
 
 # Custom port and config
-go run ./cmd/majordomo --port ":18080" --config ./my-config.json
+make dev args="--port :18080 --config ./my-config.json"
 
 # Build binary
-go build -o bin/majordomo ./cmd/majordomo
+make build
+
+# Run tests
+make test
+
+# Show available commands
+make help
 ```
