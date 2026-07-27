@@ -47,6 +47,8 @@ type ResultEvent struct {
 	Type    string // "status", "message", "chunk", "tool", "tool_result", "error", "done"
 	Content string
 	Tool    string
+	CallID  string
+	Args    string
 	Output  string
 	Error   string
 	Turn    int
@@ -236,6 +238,15 @@ func (a *Agent) processWorkItem(item WorkItem) {
 			case item.Results <- ResultEvent{Type: "message", Content: msg.Content, Turn: i + 1}:
 			case <-ctx.Done():
 				return
+			}
+		}
+		if len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				select {
+				case item.Results <- ResultEvent{Type: "tool", Tool: tc.Function.Name, CallID: tc.ID, Args: tc.Function.Arguments}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}

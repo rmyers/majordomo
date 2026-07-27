@@ -474,9 +474,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			case "error":
 				s.sendEventHTML(w, "error", "<span class='error'>"+session.RenderMarkdown(event.Error)+"</span>")
 			case "tool":
-				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "output": "running...", "session": sessionID, "html": session.RenderMarkdown("running...")})
+				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "callId": event.CallID, "args": event.Args, "output": "running...", "session": sessionID})
 			case "tool_result":
-				s.sendEventJSON(w, "tool_result", map[string]string{"name": event.Tool, "output": event.Output, "session": sessionID, "html": session.RenderMarkdown(event.Output)})
+				s.sendEventJSON(w, "tool_result", map[string]string{"callId": event.CallID, "output": event.Output, "error": event.Error, "session": sessionID})
 			case "done":
 				delete(accumulated, sessionID)
 				s.sendDone(w)

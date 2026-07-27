@@ -44,6 +44,7 @@ function initializeChatView() {
   const statusText = document.getElementById('status-text');
   const sessionId = window.currentSessionId;
   let turn = 0;
+  let toolElements = {};
 
   inputEl.addEventListener('input', () => {
     inputEl.style.height = 'auto';
@@ -99,6 +100,7 @@ function initializeChatView() {
     if (!query) return;
     const thisTurn = turn;
     turn++;
+    toolElements = {};
     const userDiv = document.createElement('div');
     userDiv.className = 'message user';
     userDiv.id = `user-${thisTurn}`;
@@ -116,6 +118,36 @@ function initializeChatView() {
     messagesEl.appendChild(responseDiv);
     messagesEl.scrollTop = messagesEl.scrollHeight;
     streamResponse(query, thisTurn);
+  }
+
+  function createToolSection(callId, name, args) {
+    const details = document.createElement('details');
+    details.className = 'tool-section';
+    details.id = `tool-${callId}`;
+
+    const summary = document.createElement('summary');
+    summary.className = 'tool-header';
+    summary.textContent = name;
+
+    const argsPre = document.createElement('pre');
+    argsPre.className = 'tool-body';
+    argsPre.id = `tool-args-${callId}`;
+    argsPre.textContent = args || '';
+
+    const resultPre = document.createElement('pre');
+    resultPre.className = 'tool-body';
+    resultPre.id = `tool-result-${callId}`;
+    resultPre.textContent = '';
+
+    details.appendChild(summary);
+    details.appendChild(argsPre);
+    details.appendChild(resultPre);
+
+    return details;
+  }
+
+  function decodeSSENewlines(html) {
+    return html.replace(/\\n/g, '<br>');
   }
 
   function streamResponse(query, thisTurn) {
@@ -151,45 +183,26 @@ function initializeChatView() {
       const data = JSON.parse(e.data);
       const responseEl = document.getElementById(`response-${thisTurn}`);
       if (!responseEl) return;
-      responseEl.classList.remove('typing');
 
-      const existingTool = responseEl.querySelector(`.tool-section[data-tool="${data.name}"]`);
-      if (existingTool) return;
+      const callId = data.callId;
+      if (!callId || toolElements[callId]) return;
 
-      const toolSection = createToolSection(data.name, 'running...', false);
-      const toolBody = toolSection.querySelector('.tool-body');
-      if (data.html) toolBody.innerHTML = decodeSSENewlines(data.html);
-      responseEl.appendChild(toolSection);
+      const toolDiv = createToolSection(callId, data.name, data.args || '');
+      toolElements[callId] = { resultBody: document.getElementById(`tool-result-${callId}`) };
+      responseEl.appendChild(toolDiv);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     });
 
     source.addEventListener('tool_result', (e) => {
       const data = JSON.parse(e.data);
-      const responseEl = document.getElementById(`response-${thisTurn}`);
-      if (!responseEl) return;
+      const callId = data.callId;
+      const entry = toolElements[callId];
+      if (!entry) return;
 
-      const toolSection = responseEl.querySelector(`.tool-section[data-tool="${data.name}"]`);
-      if (!toolSection) return;
-
-      const toolBody = toolSection.querySelector('.tool-body');
-      const arrow = toolSection.querySelector('.arrow');
-
-      const isErr = data.output !== 'running...' && (data.output.includes('error:') || data.output.startsWith('read ') || data.output.startsWith('write ') || data.output.includes('command failed') || data.output.includes('no change:'));
-
-      if (data.html) {
-        toolBody.innerHTML = decodeSSENewlines(data.html);
-      } else {
-        toolBody.textContent = data.output;
-      }
-
-      if (isErr) {
-        toolBody.className = 'tool-body error open';
-        arrow.textContent = '▶';
-        arrow.classList.remove('open');
-      } else {
-        toolBody.className = 'tool-body open';
-        arrow.textContent = '▶';
-        arrow.classList.remove('open');
+      const resultBody = entry.resultBody;
+      resultBody.textContent = data.output || '';
+      if (data.error) {
+        resultBody.classList.add('error');
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
     });
