@@ -472,7 +472,6 @@ func (a *Agent) executeTool(name string, args map[string]any) ToolResult {
 	}
 }
 
-// toolRead reads a file and returns its contents.
 func (a *Agent) toolRead(args map[string]any) ToolResult {
 	path, ok := args["path"].(string)
 	if !ok || path == "" {

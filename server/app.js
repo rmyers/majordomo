@@ -8,43 +8,46 @@ if (chatView) {
 }
 
 function initializeIndexView() {
-  const inputEl = document.getElementById('input');
-  const sendBtn = document.getElementById('send-btn');
-  inputEl.addEventListener('input', () => {
-    inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
-  });
-  inputEl.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      startNewSession();
-    }
-  });
-  sendBtn.addEventListener('click', startNewSession);
+  // No form, no input, no fetch — "New Chat" is a plain
+  // <a href="/chat/new"> in the template, which the server handles by
+  // creating a session and redirecting. All that's left for JS here is
+  // showing which sessions are currently active.
 
-  function startNewSession() {
-    const query = inputEl.value.trim();
-    if (!query) return;
-    fetch('/api/sessions', { method: 'POST' })
-      .then(res => res.json())
-      .then(data => {
-        window.location.href = `/chat/${data.id}`;
-      })
-      .catch(err => {
-        alert(`Failed to create session: ${err.message}`);
-      });
+  // Activity dots: each session card is expected to carry
+  // data-session-id="<id>" and contain a child with class
+  // "session-activity-dot" — add both to your grid template if they're
+  // not there yet.
+  function setActiveDot(sessionId, active) {
+    const item = document.querySelector(`[data-session-id="${sessionId}"]`);
+    if (!item) return; // session not in the currently rendered grid
+    const dot = item.querySelector('.session-activity-dot');
+    if (dot) dot.classList.toggle('active', active);
   }
+
+  // Seed initial state — a session can already be mid-turn if the user
+  // navigated away from its chat view and back to the index, since
+  // StreamManager keeps running server-side regardless of what page is
+  // showing.
+  window.go.main.App.ActiveSessions().then((ids) => {
+    (ids || []).forEach((id) => setActiveDot(id, true));
+  });
+
+  // Then stay current via the global broadcast channel. One listener
+  // covers every session on the grid — no per-session subscriptions.
+  window.runtime.EventsOn('sessions:activity', (evt) => {
+    const { sessionId, active } = evt || {};
+    setActiveDot(sessionId, active);
+  });
 }
 
 function initializeChatView() {
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send-btn');
+  const cancelBtn = document.getElementById('cancel-btn'); // add this button to your template
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
   const sessionId = window.currentSessionId;
-  let turn = 0;
-  let toolElements = {};
 
   inputEl.addEventListener('input', () => {
     inputEl.style.height = 'auto';
@@ -57,143 +60,68 @@ function initializeChatView() {
     }
   });
   sendBtn.addEventListener('click', sendMessage);
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      window.go.main.App.CancelStream(sessionId, false);
+    });
+  }
 
   function setStatus(state, text) {
     statusDot.className = state;
     statusText.textContent = text;
   }
 
+  // Every chat-window update — the new user bubble, the "thinking"
+  // placeholder, streamed tokens, tool notices, the final response,
+  // errors, cancellation — arrives here as ready-to-insert HTML. This
+  // listener never builds a DOM node itself; it only inserts or swaps
+  // whatever the server already rendered.
+  window.runtime.EventsOn(`stream:${sessionId}`, (evt) => {
+    const { event, target, html } = evt || {};
+
+    if (html) {
+      const el = target ? document.getElementById(target) : null;
+      if (el) {
+        el.outerHTML = html;
+      } else {
+        messagesEl.insertAdjacentHTML('beforeend', html);
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    switch (event) {
+      case 'status':
+        setStatus('connected', 'thinking...');
+        break;
+      case 'queued':
+        setStatus('connected', 'queued...');
+        break;
+      case 'error':
+        setStatus('error', 'error');
+        sendBtn.disabled = false;
+        break;
+      case 'cancelled':
+        setStatus('', 'cancelled');
+        sendBtn.disabled = false;
+        break;
+      case 'done':
+        setStatus('', 'ready');
+        sendBtn.disabled = false;
+        break;
+    }
+  });
+
   function sendMessage() {
     const query = inputEl.value.trim();
     if (!query) return;
-    const thisTurn = turn;
-    turn++;
-    toolElements = {};
-    const userDiv = document.createElement('div');
-    userDiv.className = 'message user';
-    userDiv.id = `user-${thisTurn}`;
-    userDiv.textContent = query;
-    messagesEl.appendChild(userDiv);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
     inputEl.value = '';
     inputEl.style.height = 'auto';
     sendBtn.disabled = true;
-    setStatus('connected', 'thinking...');
-    const responseDiv = document.createElement('div');
-    responseDiv.className = 'message assistant typing';
-    responseDiv.id = `response-${thisTurn}`;
-    responseDiv.innerHTML = '<span></span><span></span><span></span>';
-    messagesEl.appendChild(responseDiv);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    streamResponse(query, thisTurn);
-  }
+    setStatus('connected', 'sending...');
 
-  function createToolSection(callId, name, args) {
-    const details = document.createElement('details');
-    details.className = 'tool-section';
-    details.id = `tool-${callId}`;
-
-    const summary = document.createElement('summary');
-    summary.className = 'tool-header';
-    summary.textContent = name;
-
-    const argsPre = document.createElement('pre');
-    argsPre.className = 'tool-body';
-    argsPre.id = `tool-args-${callId}`;
-    argsPre.textContent = args || '';
-
-    const resultPre = document.createElement('pre');
-    resultPre.className = 'tool-body';
-    resultPre.id = `tool-result-${callId}`;
-    resultPre.textContent = '';
-
-    details.appendChild(summary);
-    details.appendChild(argsPre);
-    details.appendChild(resultPre);
-
-    return details;
-  }
-
-  function decodeSSENewlines(html) {
-    return html.replace(/\\n/g, '<br>');
-  }
-
-  function streamResponse(query, thisTurn) {
-    const url = `/api/stream?query=${encodeURIComponent(query)}&session=${sessionId}`;
-    const source = new EventSource(url);
-
-    source.addEventListener('session', (e) => {
-      setStatus('connected', 'thinking...');
-    });
-
-    source.addEventListener('status', (e) => {
-      setStatus('connected', 'thinking...');
-    });
-
-    source.addEventListener('message', (e) => {
-      const responseEl = document.getElementById(`response-${thisTurn}`);
-      if (!responseEl) return;
-      responseEl.classList.remove('typing');
-      responseEl.innerHTML = decodeSSENewlines(e.data);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    });
-
-    source.addEventListener('error', (e) => {
-      const responseEl = document.getElementById(`response-${thisTurn}`);
-      if (!responseEl) return;
-      responseEl.classList.remove('typing');
-      responseEl.innerHTML = decodeSSENewlines(e.data);
-      sendBtn.disabled = false;
+    window.go.main.App.SendMessage(query, sessionId).catch((err) => {
       setStatus('error', 'error');
-    });
-
-    source.addEventListener('tool', (e) => {
-      const data = JSON.parse(e.data);
-      const responseEl = document.getElementById(`response-${thisTurn}`);
-      if (!responseEl) return;
-
-      const callId = data.callId;
-      if (!callId || toolElements[callId]) return;
-
-      const toolDiv = createToolSection(callId, data.name, data.args || '');
-      toolElements[callId] = { resultBody: document.getElementById(`tool-result-${callId}`) };
-      responseEl.appendChild(toolDiv);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    });
-
-    source.addEventListener('tool_result', (e) => {
-      const data = JSON.parse(e.data);
-      const callId = data.callId;
-      const entry = toolElements[callId];
-      if (!entry) return;
-
-      const resultBody = entry.resultBody;
-      resultBody.textContent = data.output || '';
-      if (data.error) {
-        resultBody.classList.add('error');
-      }
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    });
-
-    source.addEventListener('done', (e) => {
-      source.close();
-      const responseEl = document.getElementById(`response-${thisTurn}`);
-      if (responseEl && responseEl.textContent.trim() === '' && !responseEl.querySelector('.tool-section')) {
-        responseEl.remove();
-      }
       sendBtn.disabled = false;
-      setStatus('', 'disconnected');
     });
-
-    source.onerror = () => {
-      source.close();
-      const el = document.getElementById(`response-${thisTurn}`);
-      if (el) {
-        el.classList.remove('typing');
-        el.innerHTML = `<span class='error'>Connection error</span>`;
-      }
-      sendBtn.disabled = false;
-      setStatus('error', 'error');
-    };
   }
 }

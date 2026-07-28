@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "majordomo assistant",
+  "outputfilename": "majordomo",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "Robert Myers",
+    "email": "rmyers@anaconda.com"
+  }
+}

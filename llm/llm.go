@@ -101,9 +101,9 @@ type toolsMarshal struct {
 }
 
 type toolFunctionDefinition struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	Parameters  map[string]any         `json:"parameters"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
 }
 
 // MarshalJSON serializes Tool in the format expected by the OpenAI API.
