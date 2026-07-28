@@ -4,11 +4,9 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 
@@ -65,17 +63,10 @@ func (s *Server) loadRouter() {
 	s.Router.HandleFunc("GET /settings", s.handleGetSettings)
 	s.Router.HandleFunc("POST /settings", s.handlePostSettings)
 
-	// Session endpoints
-	s.Router.HandleFunc("GET /api/sessions", s.handleListSessions)
-	s.Router.HandleFunc("POST /api/sessions", s.handleCreateSession)
-
-	// Session history endpoint: GET /api/sessions/{id}/history.
-	s.Router.HandleFunc("GET /api/sessions/{id}/history", s.handleSessionHistory)
-
 	// Chat page: serves the web UI with a specific session.
 	// Route: /chat/{id} → serve web UI with the specified session.
+	s.Router.HandleFunc("GET /chat/new", s.handleNewChat)
 	s.Router.HandleFunc("/chat/{id}", s.handleChat)
-	s.Router.HandleFunc("/api/stream", s.handleStream)
 	s.Router.HandleFunc("/", s.handleRoot)
 }
 
@@ -228,41 +219,28 @@ func (s *Server) renderSettingsPage(w http.ResponseWriter, r *http.Request, succ
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Settings(w, data); err != nil {
-		slog.Error("settings page error", "error", err, "url", r.URL)
 		http.Error(w, "Error rendering settings", http.StatusInternalServerError)
 		return
 	}
 }
 
-// handleListSessions returns the list of session summaries (id + title).
-func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	summaries, err := s.sessionSrv.ListSessions()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("list sessions: %v", err), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(summaries)
-}
-
-func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
-	slog.Info("creating new session")
-	if err := r.ParseForm(); err != nil {
-		slog.Error("failed to parse form", "error", err)
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-	prompt := strings.TrimSpace(r.Form.Get("prompt"))
-
-	// Query is handled by handleStream, not here
-	sess, err := s.sessionSrv.CreateSession(prompt)
+// handleNewChat creates a fresh, empty session and redirects to its chat
+// page. This is what "/chat/new" links to — a plain <a href="/chat/new">
+// is enough on the frontend; the redirect does the rest, same as any
+// other server-rendered navigation, no JS or form required.
+//
+// Uses GET rather than POST: this only makes sense as something a link
+// (not a form submit) can trigger, and since this app runs locally via
+// Wails rather than as a public multi-tenant web service, GET-triggers-a-
+// write isn't the CSRF/caching concern it would be on the open web.
+func (s *Server) handleNewChat(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.sessionSrv.CreateSession("")
 	if err != nil {
 		slog.Error("failed to create session", "error", err)
-		http.Error(w, fmt.Sprintf("create session: %v", err), http.StatusInternalServerError)
+		http.Error(w, "failed to create session", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"id": sess.ID()})
+	http.Redirect(w, r, "/chat/"+sess.ID(), http.StatusSeeOther)
 }
 
 // handleChat serves the chat page for a specific session with server-side rendered messages.
@@ -282,11 +260,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sess.Close()
 
+	var messages []session.Message
 	events, err := s.sessionSrv.SessionHistory(sessionID)
 	if err != nil {
 		slog.Error("failed to load session history", "sessionID", sessionID, "error", err)
 		http.Error(w, "failed to load session history", http.StatusInternalServerError)
 		return
+	}
+
+	for _, ev := range events {
+		if ev.Type == "message" && ev.Message != nil {
+			var msg session.Message
+			if unmarshalErr := json.Unmarshal(*ev.Message, &msg); unmarshalErr == nil {
+				if (msg.Role == "user" || msg.Role == "assistant") && msg.Content != "" {
+					messages = append(messages, msg)
+				}
+			}
+		}
 	}
 
 	summaries, err := s.sessionSrv.ListSessions()
@@ -315,74 +305,32 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := templates.Chat(w, data); err != nil {
-		http.Error(w, "Error rendering chat", http.StatusBadRequest)
+		http.Error(w, "Error rendering home", http.StatusBadRequest)
 		return
 	}
 }
 
-// handleSessionHistory returns the full message history for a session.
-// Route: GET /api/sessions/{id}/history
-func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	sessionID := r.PathValue("id")
-	if sessionID == "" {
-		http.Error(w, "missing session ID", http.StatusBadRequest)
-		return
-	}
-
-	slog.Info("loading session history", "sessionID", sessionID)
-
-	events, err := s.sessionSrv.SessionHistory(sessionID)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "session not found", http.StatusNotFound)
-			return
-		}
-		slog.Error("failed to load session history", "sessionID", sessionID, "error", err)
-		http.Error(w, fmt.Sprintf("load history: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(events)
-}
-
-// handleStream handles SSE connections for the agent loop.
-// The session ID is passed via ?session=<id> query parameter.
-// If no session ID is provided, a new session is created.
-func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.URL.Query().Get("session")
-
-	query := r.URL.Query().Get("query")
-	if query == "" && r.Method == "POST" {
-		buf := make([]byte, 1024*64)
-		n, _ := r.Body.Read(buf)
-		query = strings.TrimSpace(string(buf[:n]))
-	}
-	if query == "" {
-		http.Error(w, "missing query", http.StatusBadRequest)
-		return
-	}
-
-	slog.Info("stream request", "query", query, "sessionID", sessionID, "remoteAddr", r.RemoteAddr)
+// StreamQuery runs one turn of the agent loop for query against sessionID,
+// relaying every event to sink. It blocks until the agent finishes, errors,
+// or ctx is cancelled — so it's meant to be called from a goroutine, not
+// directly on a request-handling or UI-bound call path. In practice
+// StreamManager.run is the only caller, and it already backgrounds this
+// itself; call StreamQuery directly only if you're bypassing
+// StreamManager's per-session queueing/cancellation entirely.
+func (s *Server) StreamQuery(ctx context.Context, sessionID, turnID, query string, sink StreamSink) {
+	target := responseTargetID(turnID)
 
 	sess, err := s.sessionSrv.OpenSession(sessionID)
 	if err != nil {
 		slog.Error("failed to open session", "id", sessionID, "error", err)
-		http.Error(w, fmt.Sprintf("session not found: %v", err), http.StatusNotFound)
+		sink.Emit("error", target, assistantHTML(turnID, false, errorHTML(fmt.Sprintf("session not found: %v", err))))
 		return
 	}
 	slog.Info("session resumed", "id", sess.ID())
 
 	sess.RecordMessage("user", query, nil, "")
 
-	prompt := agent.SystemPrompt()
 	messages := []llm.Message{
-		{Role: "system", Content: prompt},
 		{Role: "user", Content: query},
 	}
 
@@ -421,20 +369,6 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	s.sendEventJSON(w, "session", map[string]string{"id": sess.ID()})
-
 	// Create work item and submit to agent
 	resultsCh := make(chan agent.ResultEvent, 10)
 	doneCh := make(chan error, 1)
@@ -448,71 +382,51 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.agent.SubmitWork(workItem) {
-		s.sendEventJSON(w, "error", map[string]string{"message": "agent queue full"})
-		s.sendDone(w)
+		sink.Emit("error", target, assistantHTML(turnID, false, errorHTML("agent queue full")))
 		return
 	}
 
-	// Accumulated text per session for streaming (text → HTML).
-	accumulated := make(map[string]string)
+	// Accumulated text for this turn (text → HTML). Scoped to this single
+	// StreamQuery call, so no map/session-keying needed.
+	var accumulated string
 
-	// Relay agent results to SSE stream
-	go func() {
-		defer cancel()
-		for event := range resultsCh {
+	for {
+		select {
+		case <-ctx.Done():
+			// Cancelled mid-turn. This is the one place that still has
+			// `accumulated` in scope, so it's also the right place to
+			// render the "(cancelled)" marker onto whatever partial
+			// response existed — StreamManager, which triggers the
+			// cancel, doesn't have that context.
+			sink.Emit("cancelled", target, assistantHTML(turnID, false,
+				session.RenderMarkdown(accumulated)+`<br><span class="cancelled">(cancelled)</span>`))
+			return
+		case event, ok := <-resultsCh:
+			if !ok {
+				// Channel closed without an explicit "done" event — treat
+				// as finished so the UI doesn't hang on a typing indicator.
+				sink.Emit("done", target, assistantHTML(turnID, false, session.RenderMarkdown(accumulated)))
+				return
+			}
 			switch event.Type {
 			case "status":
-				s.sendEventJSON(w, "status", map[string]string{"status": "thinking", "session": sessionID})
+				// Agent-level "thinking" ping. The typing placeholder is
+				// already showing (StreamManager set it when this turn
+				// started), so there's nothing new to render here.
 			case "chunk":
-				accumulated[sessionID] += event.Content
-				html := session.RenderMarkdown(accumulated[sessionID])
-				s.sendEventHTML(w, "message", html)
+				accumulated += event.Content
+				sink.Emit("message", target, assistantHTML(turnID, false, session.RenderMarkdown(accumulated)))
 			case "message":
-				accumulated[sessionID] = event.Content
-				html := session.RenderMarkdown(accumulated[sessionID])
-				s.sendEventHTML(w, "message", html)
+				accumulated = event.Content
+				sink.Emit("message", target, assistantHTML(turnID, false, session.RenderMarkdown(accumulated)))
 			case "error":
-				s.sendEventHTML(w, "error", "<span class='error'>"+session.RenderMarkdown(event.Error)+"</span>")
+				sink.Emit("error", target, assistantHTML(turnID, false, errorHTML(session.RenderMarkdown(event.Error))))
 			case "tool":
-				s.sendEventJSON(w, "tool", map[string]string{"name": event.Tool, "callId": event.CallID, "args": event.Args, "output": "running...", "session": sessionID})
-			case "tool_result":
-				s.sendEventJSON(w, "tool_result", map[string]string{"callId": event.CallID, "output": event.Output, "error": event.Error, "session": sessionID})
+				sink.Emit("tool", target, assistantHTML(turnID, true, toolBadgeHTML(event.Tool)+session.RenderMarkdown(accumulated)))
 			case "done":
-				delete(accumulated, sessionID)
-				s.sendDone(w)
+				sink.Emit("done", target, assistantHTML(turnID, false, session.RenderMarkdown(accumulated)))
+				return
 			}
-			flusher.Flush()
 		}
-	}()
-
-	// Wait for client disconnect
-	<-ctx.Done()
-}
-
-// sendEventJSON sends a single SSE event with JSON data.
-func (s *Server) sendEventJSON(w http.ResponseWriter, event string, data map[string]string) {
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, mustJSON(data))
-}
-
-// sendEventHTML sends a single SSE event with raw HTML data.
-func (s *Server) sendEventHTML(w http.ResponseWriter, event string, html string) {
-	// Strip the trailing newline so Split does not produce an empty trailing element.
-	html = strings.TrimSuffix(html, "\n")
-	lines := strings.Split(html, "\n")
-	fmt.Fprintf(w, "event: %s\n", event)
-	for _, line := range lines {
-		fmt.Fprintf(w, "data: %s\n", line)
 	}
-	fmt.Fprintf(w, "\n")
-}
-
-// sendDone sends the [DONE] marker.
-func (s *Server) sendDone(w http.ResponseWriter) {
-	fmt.Fprint(w, "event: done\ndata: [DONE]\n\n")
-}
-
-// mustJSON marshals v to JSON.
-func mustJSON(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }

@@ -41,17 +41,24 @@ func main() {
 	sessionService := session.NewSessionService(cfg)
 	srv := server.New(cfg, sessionService, agt, llmManager)
 
-	app := NewApp(srv, agt)
+	app := NewApp(srv)
+	go agt.RunMainLoop()
 
 	err := wails.Run(&options.App{
-		Title:            "majordomo-ui",
-		Width:            1024,
-		Height:           768,
-		AssetServer:      &assetserver.Options{Handler: srv.Router},
-		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
-		OnStartup:        app.startup,
-		OnShutdown:       app.exit,
-		Bind:             []interface{}{app},
+		Title:  "Majordomo",
+		Width:  1024,
+		Height: 768,
+		AssetServer: &assetserver.Options{
+			// Hand Wails your real mux directly — regular page loads and
+			// HTMX requests go straight through it, unchanged. Only the
+			// streaming endpoint bypasses this and goes over Wails events
+			// via App.StartStream instead (see wails_stream.go).
+			Handler: srv.Router,
+		},
+		OnStartup: app.startup,
+		Bind: []interface{}{
+			app,
+		},
 	})
 
 	if err != nil {

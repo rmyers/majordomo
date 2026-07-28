@@ -1,7 +1,7 @@
 {
   "$schema": "https://wails.io/schemas/config.v2.json",
-  "name": "majordomo-ui",
-  "outputfilename": "majordomo-ui",
+  "name": "majordomo assistant",
+  "outputfilename": "majordomo",
   "frontend:install": "",
   "frontend:build": "",
   "frontend:dev:watcher": "",
