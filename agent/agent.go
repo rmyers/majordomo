@@ -40,6 +40,7 @@ type WorkItem struct {
 	Messages  []llm.Message
 	Results   chan ResultEvent
 	Done      chan error
+	Context   context.Context
 }
 
 // ResultEvent is sent back through a WorkItem's Results channel.
@@ -197,7 +198,11 @@ func (a *Agent) processWorkItem(item WorkItem) {
 
 	slog.Info("processing work item", "sessionID", item.SessionID)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := item.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	if item.SessionID != "" {
 		a.mu.Lock()
 		a.activeSessions[item.SessionID] = &activeSession{ctx: ctx, cancel: cancel}

@@ -381,6 +381,22 @@ tool-result.error {
   cursor: default;
 }
 
+#cancel-btn {
+  padding: 10px 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: none;
+  color: var(--error);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+#cancel-btn:hover {
+  opacity: 0.85;
+}
+
 /* Typing indicator */
 .typing {
   display: flex;
