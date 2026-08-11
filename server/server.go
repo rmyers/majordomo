@@ -224,15 +224,9 @@ func (s *Server) renderSettingsPage(w http.ResponseWriter, r *http.Request, succ
 	}
 }
 
-// handleNewChat creates a fresh, empty session and redirects to its chat
-// page. This is what "/chat/new" links to — a plain <a href="/chat/new">
-// is enough on the frontend; the redirect does the rest, same as any
-// other server-rendered navigation, no JS or form required.
-//
-// Uses GET rather than POST: this only makes sense as something a link
-// (not a form submit) can trigger, and since this app runs locally via
-// Wails rather than as a public multi-tenant web service, GET-triggers-a-
-// write isn't the CSRF/caching concern it would be on the open web.
+// handleNewChat creates a fresh, empty session and navigates to its chat
+// page. The redirect is done client-side via a minimal HTML page because
+// Wails doesn't follow HTTP redirects from client-triggered navigation.
 func (s *Server) handleNewChat(w http.ResponseWriter, r *http.Request) {
 	sess, err := s.sessionSrv.CreateSession("")
 	if err != nil {
@@ -240,7 +234,9 @@ func (s *Server) handleNewChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create session", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/chat/"+sess.ID(), http.StatusSeeOther)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<html><head><script>window.location.replace("/chat/%s");</script></head><body></body></html>`, sess.ID())
 }
 
 // handleChat serves the chat page for a specific session with server-side rendered messages.
@@ -379,6 +375,7 @@ func (s *Server) StreamQuery(ctx context.Context, sessionID, turnID, query strin
 		Messages:  messages,
 		Results:   resultsCh,
 		Done:      doneCh,
+		Context:   ctx,
 	}
 
 	if !s.agent.SubmitWork(workItem) {
